@@ -1,80 +1,240 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{info, warn, error};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::process::Command;
 
-// Noticed your GPU *blushes*
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUDevice {
     pub id: String,
     pub vendor_id: String,
     pub device_id: String,
     pub iommu_group: Option<u32>,
     pub is_available: bool,
+    pub pci_address: String,
+    pub driver: String,
+    pub memory_mb: u64,
 }
 
-// GPU Manager goes hard
 pub struct GPUManager {
     devices: Vec<GPUDevice>,
+    sysfs_path: String,
 }
 
 impl GPUManager {
-  
     pub fn new() -> Result<Self> {
-        info!("GPU Manager: I'm alive! Time to catch some graphics cards!");
+        info!("Initializing GPU Manager with system checks");
+        
+        // Check if we have necessary permissions
+        if !has_required_permissions() {
+            error!("Insufficient permissions for GPU management");
+            return Err(anyhow::anyhow!("Required root/admin permissions not available"));
+        }
+
         Ok(Self { 
-            devices: Vec::new() 
+            devices: Vec::new(),
+            sysfs_path: "/sys/bus/pci/devices".to_string(),
         })
     }
 
-
     pub fn discover_gpus(&mut self) -> Result<()> {
-        // TODO: Implement GPU discovery -@virjilakrum
-        // For now, just a placeholder that pretends to find a GPU
-        warn!("GPU-chan is still learning how to find other GPUs >.<");
-        
-        self.devices.push(GPUDevice {
-            id: "gpu-0".to_string(),
-            vendor_id: "10de".to_string(), 
-            device_id: "2204".to_string(), 
-            iommu_group: Some(13), 
-            is_available: true,
-        });
+        info!("Starting GPU discovery process");
+        self.devices.clear();
 
-        info!("Found {} GPU(s)! Sugoi!", self.devices.len());
+        // Read PCI devices
+        let gpu_classes = ["0x030000", "0x030200"]; // VGA compatible and 3D controller
+        let entries = fs::read_dir(&self.sysfs_path)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if self.is_gpu_device(&path, &gpu_classes)? {
+                if let Ok(gpu) = self.create_gpu_device(&path) {
+                    info!("Discovered GPU: Vendor {} Device {}", gpu.vendor_id, gpu.device_id);
+                    self.devices.push(gpu);
+                }
+            }
+        }
+
+        // Check IOMMU groups for each GPU
+        self.assign_iommu_groups()?;
+        
+        info!("GPU discovery completed. Found {} devices", self.devices.len());
         Ok(())
     }
 
-    // Time to yeet this GPU into a VM!
-    pub fn attach_gpu_to_vm(&mut self, gpu_id: &str, vm_xml: &str) -> Result<String> {
-        // Find our precious GPU
-        let gpu = self.devices.iter_mut().find(|g| g.id == gpu_id);
+    fn is_gpu_device(&self, path: &Path, gpu_classes: &[&str]) -> Result<bool> {
+        let class_path = path.join("class");
+        if let Ok(class) = fs::read_to_string(class_path) {
+            let class = class.trim();
+            return Ok(gpu_classes.contains(&class));
+        }
+        Ok(false)
+    }
+
+    fn create_gpu_device(&self, path: &Path) -> Result<GPUDevice> {
+        let vendor_id = fs::read_to_string(path.join("vendor"))?.trim().replace("0x", "");
+        let device_id = fs::read_to_string(path.join("device"))?.trim().replace("0x", "");
+        let driver = fs::read_to_string(path.join("driver_override"))
+            .unwrap_or_else(|_| fs::read_to_string(path.join("driver"))
+            .unwrap_or_else(|_| "unknown".to_string()));
         
-        match gpu {
-            Some(gpu) if gpu.is_available => {
-                info!("GPU-chan is ready to join VM-sama!");
-                gpu.is_available = false;
-                
-                // Add GPU to VM XML config
-                // TODO: Implement actual XML modification
-                let new_xml = format!("{}\n<!-- GPU {} attached -->", vm_xml, gpu_id);
-                
-                Ok(new_xml)
-            },
-            Some(_) => {
-                warn!("Gomenasai, GPU is already taken by another VM (；⌣̀_⌣́)");
-                Err(anyhow::anyhow!("GPU not available"))
-            },
-            None => {
-                warn!("Nani?! GPU not found ಥ_ಥ");
-                Err(anyhow::anyhow!("GPU not found"))
+        let pci_address = path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let memory_mb = self.get_gpu_memory(&pci_address)?;
+
+        Ok(GPUDevice {
+            id: format!("gpu-{}", pci_address),
+            vendor_id,
+            device_id,
+            pci_address,
+            driver: driver.trim().to_string(),
+            iommu_group: None,
+            is_available: true,
+            memory_mb,
+        })
+    }
+
+    fn get_gpu_memory(&self, pci_address: &str) -> Result<u64> {
+        // Try nvidia-smi first
+        if let Ok(output) = Command::new("nvidia-smi")
+            .args(&["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+            .output() 
+        {
+            if output.status.success() {
+                if let Ok(memory_str) = String::from_utf8(output.stdout) {
+                    if let Ok(memory) = memory_str.trim().parse::<u64>() {
+                        return Ok(memory);
+                    }
+                }
             }
         }
+
+        // Fallback to reading sysfs for AMD cards
+        let memory_path = Path::new("/sys/class/drm")
+            .join(format!("card{}", pci_address))
+            .join("device/mem_info_vram_total");
+
+        if memory_path.exists() {
+            if let Ok(memory_str) = fs::read_to_string(memory_path) {
+                if let Ok(memory_bytes) = memory_str.trim().parse::<u64>() {
+                    return Ok(memory_bytes / (1024 * 1024)); // Convert to MB
+                }
+            }
+        }
+
+        // Default fallback
+        Ok(0)
+    }
+
+    pub fn assign_iommu_groups(&mut self) -> Result<()> {
+        let iommu_path = Path::new("/sys/kernel/iommu_groups");
+        if !iommu_path.exists() {
+            warn!("IOMMU groups not available on this system");
+            return Ok(());
+        }
+
+        for device in &mut self.devices {
+            let device_path = Path::new("/sys/bus/pci/devices")
+                .join(&device.pci_address)
+                .join("iommu_group");
+
+            if let Ok(group_path) = fs::read_link(device_path) {
+                if let Some(group_name) = group_path.file_name() {
+                    if let Ok(group_num) = group_name.to_string_lossy().parse::<u32>() {
+                        device.iommu_group = Some(group_num);
+                        info!("Assigned IOMMU group {} to GPU {}", group_num, device.id);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn attach_gpu_to_vm(&mut self, gpu_id: &str, vm_xml: &str) -> Result<String> {
+        let gpu = self.devices.iter_mut()
+            .find(|g| g.id == gpu_id)
+            .ok_or_else(|| anyhow::anyhow!("GPU not found"))?;
+
+        if !gpu.is_available {
+            return Err(anyhow::anyhow!("GPU is already in use"));
+        }
+
+        // Prepare GPU passthrough XML configuration
+        let gpu_xml = format!(
+            r#"
+            <hostdev mode='subsystem' type='pci' managed='yes'>
+                <source>
+                    <address domain='0x0000' bus='0x{}'
+                            slot='0x{}' function='0x{}'/>
+                </source>
+                <address type='pci' domain='0x0000' bus='0x00'
+                         slot='0x{:02x}' function='0x0'/>
+            </hostdev>
+            "#,
+            &gpu.pci_address[0..2],
+            &gpu.pci_address[3..5],
+            &gpu.pci_address[6..7],
+            self.calculate_next_free_slot(vm_xml)?
+        );
+
+        // Insert GPU configuration before closing devices tag
+        let new_xml = if let Some(pos) = vm_xml.rfind("</devices>") {
+            let (start, end) = vm_xml.split_at(pos);
+            format!("{}{}{}", start, gpu_xml, end)
+        } else {
+            return Err(anyhow::anyhow!("Invalid VM XML: no devices section found"));
+        };
+
+        gpu.is_available = false;
+        info!("GPU {} successfully configured for VM attachment", gpu_id);
+        
+        Ok(new_xml)
+    }
+
+    fn calculate_next_free_slot(&self, vm_xml: &str) -> Result<u8> {
+        // Parse existing PCI slots from VM XML
+        let mut used_slots = Vec::new();
+        for line in vm_xml.lines() {
+            if line.contains("slot='0x") {
+                if let Some(slot_str) = line.split("slot='0x").nth(1) {
+                    if let Some(slot_hex) = slot_str.split('\'').next() {
+                        if let Ok(slot) = u8::from_str_radix(slot_hex, 16) {
+                            used_slots.push(slot);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find first available slot (starting from 0x02)
+        for slot in 2..32 {
+            if !used_slots.contains(&slot) {
+                return Ok(slot);
+            }
+        }
+
+        Err(anyhow::anyhow!("No free PCI slots available"))
     }
 }
 
-// GPU collection 
-#[derive(Debug)]
-pub struct GPUCollection {
-    available_gpus: Vec<GPUDevice>,
-    assigned_gpus: Vec<(GPUDevice, String)>, // (GPU, VM ID)
+fn has_required_permissions() -> bool {
+    if cfg!(unix) {
+        Command::new("id")
+            .arg("-u")
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout).trim() == "0"
+            })
+            .unwrap_or(false)
+    } else {
+        // TODO: Windows admin check would go here -@virjilakrum
+        true // Placeholder for Windows implementation
+    }
 }
