@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-share-manager
+  namespace: gpu-share
+  labels:
+    app: gpu-share-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-share-manager
+  template:
+    metadata:
+      labels:
+        app: gpu-share-manager
+    spec:
+      containers:
+      - name: gpu-share-manager
+        image: gpu-share-manager:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: vm-images
+          mountPath: /var/lib/gpu-share/images
+        - name: libvirt-sock
+          mountPath: /var/run/libvirt/libvirt-sock
+        securityContext:
+          privileged: true
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+        env:
+        - name: RUST_LOG
+          value: "info"
+      volumes:
+      - name: config-volume
+        configMap:
+          name: gpu-share-config
+      - name: vm-images
+        persistentVolumeClaim:
+          claimName: vm-images-pvc
+      - name: libvirt-sock
+        hostPath:
+          path: /var/run/libvirt/libvirt-sock

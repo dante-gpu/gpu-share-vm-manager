@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-share-manager
+  namespace: gpu-share
+spec:
+  selector:
+    app: gpu-share-manager
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: LoadBalancer
