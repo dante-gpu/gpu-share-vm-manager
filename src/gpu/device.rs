@@ -157,7 +157,7 @@ impl GPUManager {
     }
 
     pub fn attach_gpu_to_vm(&mut self, gpu_id: &str, vm_xml: &str) -> Result<String> {
-        // GPU'yu bul ve kopyala
+        // Finding and cloning the GPU
         let gpu = match self.devices.iter().find(|d| d.id == gpu_id) {
             Some(device) => device.clone(),
             None => return Err(anyhow::anyhow!("GPU not found")),
@@ -167,7 +167,7 @@ impl GPUManager {
             return Err(anyhow::anyhow!("GPU is not available"));
         }
 
-        // XML yapılandırmasını hazırla
+        // Preparing the XML configuration
         let gpu_xml = format!(
             r#"
             <hostdev mode='subsystem' type='pci' managed='yes'>
@@ -185,7 +185,7 @@ impl GPUManager {
             self.calculate_next_free_slot(vm_xml)?
         );
 
-        // XML'i güncelle
+        // Updating the XML
         let new_xml = if let Some(pos) = vm_xml.rfind("</devices>") {
             let (start, end) = vm_xml.split_at(pos);
             format!("{}{}{}", start, gpu_xml, end)
@@ -193,7 +193,7 @@ impl GPUManager {
             return Err(anyhow::anyhow!("Invalid VM XML: no devices section found"));
         };
 
-        // GPU'yu kullanılamaz olarak işaretle
+        // Ticking the GPU as unavailable
         if let Some(gpu) = self.devices.iter_mut().find(|d| d.id == gpu_id) {
             gpu.is_available = false;
         }
