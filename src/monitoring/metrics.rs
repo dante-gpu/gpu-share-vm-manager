@@ -250,4 +250,12 @@ impl MetricsCollector {
 
         metrics.retain(|m| current_time - m.timestamp < retention_secs);
     }
+
+    pub fn get_vm_metrics(&self, vm_id: &str) -> Result<Vec<ResourceMetrics>, anyhow::Error> {
+        if let Some(metrics) = self.vm_metrics.get(vm_id) {
+            Ok(metrics.clone())
+        } else {
+            Err(anyhow::anyhow!("No metrics found for VM {}", vm_id))
+        }
+    }
 }

@@ -1,8 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::fs::{self};
 use std::path::Path;
 use std::process::Command;
 
@@ -158,15 +157,17 @@ impl GPUManager {
     }
 
     pub fn attach_gpu_to_vm(&mut self, gpu_id: &str, vm_xml: &str) -> Result<String> {
-        let gpu = self.devices.iter_mut()
-            .find(|g| g.id == gpu_id)
-            .ok_or_else(|| anyhow::anyhow!("GPU not found"))?;
+        // GPU'yu bul ve kopyala
+        let gpu = match self.devices.iter().find(|d| d.id == gpu_id) {
+            Some(device) => device.clone(),
+            None => return Err(anyhow::anyhow!("GPU not found")),
+        };
 
         if !gpu.is_available {
-            return Err(anyhow::anyhow!("GPU is already in use"));
+            return Err(anyhow::anyhow!("GPU is not available"));
         }
 
-        // Prepare GPU passthrough XML configuration
+        // XML yapılandırmasını hazırla
         let gpu_xml = format!(
             r#"
             <hostdev mode='subsystem' type='pci' managed='yes'>
@@ -184,7 +185,7 @@ impl GPUManager {
             self.calculate_next_free_slot(vm_xml)?
         );
 
-        // Insert GPU configuration before closing devices tag
+        // XML'i güncelle
         let new_xml = if let Some(pos) = vm_xml.rfind("</devices>") {
             let (start, end) = vm_xml.split_at(pos);
             format!("{}{}{}", start, gpu_xml, end)
@@ -192,7 +193,11 @@ impl GPUManager {
             return Err(anyhow::anyhow!("Invalid VM XML: no devices section found"));
         };
 
-        gpu.is_available = false;
+        // GPU'yu kullanılamaz olarak işaretle
+        if let Some(gpu) = self.devices.iter_mut().find(|d| d.id == gpu_id) {
+            gpu.is_available = false;
+        }
+
         info!("GPU {} successfully configured for VM attachment", gpu_id);
         
         Ok(new_xml)
@@ -221,6 +226,10 @@ impl GPUManager {
         }
 
         Err(anyhow::anyhow!("No free PCI slots available"))
+    }
+
+    pub fn get_devices(&self) -> Vec<GPUDevice> {
+        self.devices.clone()
     }
 }
 

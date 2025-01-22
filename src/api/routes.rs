@@ -1,7 +1,7 @@
 /*
 * DanteGPU API Routes Implementation 
 * -----------------------------------------------
-* @author: virjilakrum
+* @author: @virjilakrum
 * @project: gpu-share-vm-manager
 * 
 * Welcome to the nerve center of our VM management API! This is where all the HTTP magic happens,
@@ -69,9 +69,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, error};
 
-use crate::core::{LibvirtManager, VirtualMachine, VMStatus};
+use crate::core::{LibvirtManager, VMStatus};
 use crate::gpu::GPUManager;
-use crate::monitoring::MetricsCollector;
+use crate::gpu::GPUDevice;
+use crate::monitoring::metrics::MetricsCollector;
+use crate::monitoring::metrics::ResourceMetrics;
 
 // Our main application state
 pub struct AppState {
@@ -116,19 +118,19 @@ async fn create_vm(
 ) -> Result<Json<VMResponse>, StatusCode> {
     info!("Creating new VM: {}", request.name);
 
-    let mut libvirt = state.libvirt.lock().await;
+    let _libvirt = state.libvirt.lock().await;
     
-    match libvirt.create_vm(&request.name, request.memory_mb * 1024, request.cpu_cores) {
+    match _libvirt.create_vm(&request.name, request.memory_mb * 1024, request.cpu_cores) {
         Ok(domain) => {
             // Start metrics collection
             let mut metrics = state.metrics.lock().await;
-            if let Err(e) = metrics.start_collection(request.name.clone(), domain.clone()) {
+            if let Err(e) = metrics.start_collection(request.name.clone(), domain.clone()).await {
                 error!("Failed to start metrics collection: {}", e);
             }
 
             // If GPU is required, try to attach one
             if request.gpu_required {
-                let mut gpu_manager = state.gpu_manager.lock().await;
+                let _gpu_manager = state.gpu_manager.lock().await;
                 // Find available GPU and attach
                 // Implementation follows in GPU manager
             }
@@ -147,9 +149,9 @@ async fn create_vm(
 async fn list_vms(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<VMResponse>>, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
+    let _libvirt = state.libvirt.lock().await;
     
-    match libvirt.conn.list_all_domains(0) {
+    match _libvirt.list_domains() {
         Ok(domains) => {
             let mut responses = Vec::new();
             for domain in domains {
@@ -180,9 +182,9 @@ async fn get_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<VMResponse>, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
+    let _libvirt = state.libvirt.lock().await;
     
-    match libvirt.conn.lookup_domain_by_uuid_string(&id) {
+    match _libvirt.lookup_domain(&id) {
         Ok(domain) => {
             Ok(Json(VMResponse {
                 id,
@@ -208,9 +210,9 @@ async fn start_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
+    let _libvirt = state.libvirt.lock().await;
     
-    match libvirt.conn.lookup_domain_by_uuid_string(&id) {
+    match _libvirt.lookup_domain(&id) {
         Ok(domain) => {
             match domain.create() {
                 Ok(_) => Ok(StatusCode::OK),
@@ -225,9 +227,8 @@ async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
-    
-    match libvirt.conn.lookup_domain_by_uuid_string(&id) {
+    let _libvirt = state.libvirt.lock().await;
+    match _libvirt.lookup_domain(&id) {
         Ok(domain) => {
             match domain.shutdown() {
                 Ok(_) => Ok(StatusCode::OK),
@@ -241,10 +242,52 @@ async fn stop_vm(
 async fn get_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<metrics::ResourceMetrics>>, StatusCode> {
+) -> Result<Json<Vec<ResourceMetrics>>, StatusCode> {
     let metrics = state.metrics.lock().await;
+    match metrics.get_vm_metrics(&id) {
+        Ok(vm_metrics) => Ok(Json(vm_metrics)),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn delete_vm(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let _libvirt = state.libvirt.lock().await;
+    match _libvirt.destroy_vm(&id) {
+        Ok(_) => Ok(StatusCode::OK),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn list_gpus(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<GPUDevice>>, StatusCode> {
+    let mut gpu_manager = state.gpu_manager.lock().await;
+    match gpu_manager.discover_gpus() {
+        Ok(_) => {
+            let devices = gpu_manager.get_devices();
+            Ok(Json(devices))
+        },
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn attach_gpu(
+    State(state): State<Arc<AppState>>,
+    Path((vm_id, gpu_id)): Path<(String, String)>,
+) -> Result<StatusCode, StatusCode> {
+    let mut gpu_manager = state.gpu_manager.lock().await;
+    let libvirt = state.libvirt.lock().await;
     
-    // Get metrics for specific VM
-    // Implementation follows in metrics collector
-    Ok(Json(vec![])) // Placeholder
+    match libvirt.lookup_domain(&vm_id) {
+        Ok(domain) => {
+            match gpu_manager.attach_gpu_to_vm(&gpu_id, &domain.get_xml_desc(0).unwrap_or_default()) {
+                Ok(_) => Ok(StatusCode::OK),
+                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
 }
