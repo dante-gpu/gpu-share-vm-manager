@@ -109,7 +109,6 @@ impl MetricsCollector {
 
     async fn collect_vm_metrics(domain: &virt::domain::Domain) -> Result<ResourceMetrics> {
         let info = domain.get_info()?;
-        let memory_stats = domain.memory_stats(0)?;
         let job_stats = domain.get_job_stats(0)?;
 
         // Memory bilgilerini info'dan al

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+use tokio::net::TcpListener;
 
 mod core;
 mod gpu;
@@ -37,9 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Server listening on {}", addr);
     
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await?;
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

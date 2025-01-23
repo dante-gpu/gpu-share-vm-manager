@@ -67,15 +67,19 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, error};
+use tracing::error;
+use std::path::PathBuf;
 
-use crate::core::{LibvirtManager, VMStatus};
-use crate::gpu::GPUManager;
-use crate::gpu::GPUDevice;
-use crate::monitoring::metrics::MetricsCollector;
-use crate::monitoring::metrics::ResourceMetrics;
+use crate::core::libvirt::LibvirtManager;
+use crate::core::vm::{VMStatus, VMConfig};
+use crate::gpu::device::{GPUManager, GPUDevice, GPUConfig};
+use crate::monitoring::metrics::{MetricsCollector, ResourceMetrics};
 
-// Our main application state
+fn handle_error(err: impl std::fmt::Display) -> StatusCode {
+    error!("Operation failed: {}", err);
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
 pub struct AppState {
     pub libvirt: Arc<Mutex<LibvirtManager>>,
     pub gpu_manager: Arc<Mutex<GPUManager>>,
@@ -88,6 +92,7 @@ pub struct CreateVMRequest {
     pub cpu_cores: u32,
     pub memory_mb: u64,
     pub gpu_required: bool,
+    pub disk_size_gb: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +101,14 @@ pub struct VMResponse {
     pub name: String,
     pub status: VMStatus,
     pub gpu_attached: bool,
+    pub memory_mb: u64,
+    pub cpu_cores: u32,
+    pub disk_size_gb: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AttachGPURequest {
+    pub gpu_id: String,
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -112,182 +125,189 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+#[axum::debug_handler]
 async fn create_vm(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateVMRequest>,
+    Json(params): Json<CreateVMRequest>,
 ) -> Result<Json<VMResponse>, StatusCode> {
-    info!("Creating new VM: {}", request.name);
-
-    let _libvirt = state.libvirt.lock().await;
+    let libvirt = state.libvirt.lock().await;
     
-    match _libvirt.create_vm(&request.name, request.memory_mb * 1024, request.cpu_cores) {
-        Ok(domain) => {
-            // Start metrics collection
-            let mut metrics = state.metrics.lock().await;
-            if let Err(e) = metrics.start_collection(request.name.clone(), domain.clone()).await {
-                error!("Failed to start metrics collection: {}", e);
-            }
+    let config = VMConfig {
+        name: params.name.clone(),
+        memory_kb: params.memory_mb * 1024,
+        vcpus: params.cpu_cores,
+        disk_path: PathBuf::from(format!("/var/lib/gpu-share/images/{}.qcow2", params.name)),
+        disk_size_gb: params.disk_size_gb.unwrap_or(20),
+    };
+    
+    let vm = libvirt.create_vm(&config).await
+        .map_err(handle_error)?;
 
-            // If GPU is required, try to attach one
-            if request.gpu_required {
-                let _gpu_manager = state.gpu_manager.lock().await;
-                // Find available GPU and attach
-                // Implementation follows in GPU manager
-            }
+    let vm_id = vm.get_uuid_string()
+        .map_err(handle_error)?;
 
-            Ok(Json(VMResponse {
-                id: domain.get_uuid_string().unwrap(),
-                name: request.name,
-                status: VMStatus::Creating,
-                gpu_attached: request.gpu_required,
-            }))
-        }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let mut metrics = state.metrics.lock().await;
+    if let Err(e) = metrics.start_collection(vm_id.clone(), vm.clone()).await {
+        error!("Failed to start metrics collection: {}", e);
     }
+
+    Ok(Json(VMResponse {
+        id: vm_id,
+        name: params.name,
+        status: VMStatus::Creating,
+        gpu_attached: params.gpu_required,
+        memory_mb: params.memory_mb,
+        cpu_cores: params.cpu_cores,
+        disk_size_gb: config.disk_size_gb,
+    }))
 }
 
+#[axum::debug_handler]
 async fn list_vms(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<VMResponse>>, StatusCode> {
-    let _libvirt = state.libvirt.lock().await;
+    let libvirt = state.libvirt.lock().await;
     
-    match _libvirt.list_domains() {
-        Ok(domains) => {
-            let mut responses = Vec::new();
-            for domain in domains {
-                let response = VMResponse {
-                    id: domain.get_uuid_string().unwrap(),
-                    name: domain.get_name().unwrap(),
-                    status: match domain.get_state() {
-                        Ok((state, _)) => match state {
-                            1 => VMStatus::Running,
-                            5 => VMStatus::Stopped,
-                            _ => VMStatus::Failed,
-                        },
-                        Err(_) => VMStatus::Failed,
-                    },
-                    gpu_attached: domain.get_xml_desc(0)
-                        .map(|xml| xml.contains("<hostdev"))
-                        .unwrap_or(false),
-                };
-                responses.push(response);
-            }
-            Ok(Json(responses))
-        }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let domains = libvirt.list_domains()
+        .map_err(handle_error)?;
+
+    let mut responses = Vec::new();
+    for domain in domains {
+        let info = domain.get_info()
+            .map_err(handle_error)?;
+
+        let response = VMResponse {
+            id: domain.get_uuid_string().map_err(handle_error)?,
+            name: domain.get_name().map_err(handle_error)?,
+            status: VMStatus::from(info.state),
+            gpu_attached: domain.get_xml_desc(0)
+                .map(|xml| xml.contains("<hostdev"))
+                .unwrap_or(false),
+            memory_mb: info.memory / 1024,
+            cpu_cores: info.nr_virt_cpu,
+            disk_size_gb: 0, // TODO: Implement disk size detection
+        };
+        responses.push(response);
     }
+
+    Ok(Json(responses))
 }
 
+#[axum::debug_handler]
 async fn get_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<VMResponse>, StatusCode> {
-    let _libvirt = state.libvirt.lock().await;
+    let libvirt = state.libvirt.lock().await;
     
-    match _libvirt.lookup_domain(&id) {
-        Ok(domain) => {
-            Ok(Json(VMResponse {
-                id,
-                name: domain.get_name().unwrap(),
-                status: match domain.get_state() {
-                    Ok((state, _)) => match state {
-                        1 => VMStatus::Running,
-                        5 => VMStatus::Stopped,
-                        _ => VMStatus::Failed,
-                    },
-                    Err(_) => VMStatus::Failed,
-                },
-                gpu_attached: domain.get_xml_desc(0)
-                    .map(|xml| xml.contains("<hostdev"))
-                    .unwrap_or(false),
-            }))
-        }
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
+    let domain = libvirt.lookup_domain(&id)
+        .map_err(handle_error)?;
+
+    let info = domain.get_info()
+        .map_err(handle_error)?;
+
+    Ok(Json(VMResponse {
+        id,
+        name: domain.get_name().map_err(handle_error)?,
+        status: VMStatus::from(info.state),
+        gpu_attached: domain.get_xml_desc(0)
+            .map(|xml| xml.contains("<hostdev"))
+            .unwrap_or(false),
+        memory_mb: info.memory / 1024,
+        cpu_cores: info.nr_virt_cpu,
+        disk_size_gb: 0, // TODO: Implement disk size detection
+    }))
 }
 
+#[axum::debug_handler]
 async fn start_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let _libvirt = state.libvirt.lock().await;
+    let libvirt = state.libvirt.lock().await;
     
-    match _libvirt.lookup_domain(&id) {
-        Ok(domain) => {
-            match domain.create() {
-                Ok(_) => Ok(StatusCode::OK),
-                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
+    libvirt.start_domain(&id)
+        .await
+        .map_err(handle_error)?;
+
+    Ok(StatusCode::OK)
 }
 
+#[axum::debug_handler]
 async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let _libvirt = state.libvirt.lock().await;
-    match _libvirt.lookup_domain(&id) {
-        Ok(domain) => {
-            match domain.shutdown() {
-                Ok(_) => Ok(StatusCode::OK),
-                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
+    let libvirt = state.libvirt.lock().await;
+    
+    libvirt.stop_domain(&id)
+        .await
+        .map_err(handle_error)?;
+
+    Ok(StatusCode::OK)
 }
 
+#[axum::debug_handler]
+async fn delete_vm(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let libvirt = state.libvirt.lock().await;
+    
+    libvirt.delete_domain(&id)
+        .await
+        .map_err(handle_error)?;
+
+    Ok(StatusCode::OK)
+}
+
+#[axum::debug_handler]
+async fn list_gpus(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<GPUDevice>>, StatusCode> {
+    let gpu_manager = state.gpu_manager.lock().await;
+    
+    let gpus = gpu_manager.discover_gpus()
+        .map_err(handle_error)?;
+
+    Ok(Json(gpus))
+}
+
+#[axum::debug_handler]
+async fn attach_gpu(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<AttachGPURequest>,
+) -> Result<StatusCode, StatusCode> {
+    let libvirt = state.libvirt.lock().await;
+    let mut gpu_manager = state.gpu_manager.lock().await;
+    
+    let domain = libvirt.lookup_domain(&id)
+        .map_err(handle_error)?;
+
+    let gpu_id = request.gpu_id.clone();
+    let gpu_config = GPUConfig {
+        gpu_id: request.gpu_id,
+        iommu_group: gpu_manager.get_iommu_group(&gpu_id)
+            .map_err(handle_error)?
+            .ok_or(StatusCode::BAD_REQUEST)?,
+    };
+
+    gpu_manager.attach_gpu_to_vm(&domain, &gpu_config).await
+        .map_err(handle_error)?;
+
+    Ok(StatusCode::OK)
+}
+
+#[axum::debug_handler]
 async fn get_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<ResourceMetrics>>, StatusCode> {
     let metrics = state.metrics.lock().await;
-    match metrics.get_vm_metrics(&id) {
-        Ok(vm_metrics) => Ok(Json(vm_metrics)),
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
-}
-
-async fn delete_vm(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let _libvirt = state.libvirt.lock().await;
-    match _libvirt.destroy_vm(&id) {
-        Ok(_) => Ok(StatusCode::OK),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn list_gpus(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<GPUDevice>>, StatusCode> {
-    let mut gpu_manager = state.gpu_manager.lock().await;
-    match gpu_manager.discover_gpus() {
-        Ok(_) => {
-            let devices = gpu_manager.get_devices();
-            Ok(Json(devices))
-        },
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn attach_gpu(
-    State(state): State<Arc<AppState>>,
-    Path((vm_id, gpu_id)): Path<(String, String)>,
-) -> Result<StatusCode, StatusCode> {
-    let mut gpu_manager = state.gpu_manager.lock().await;
-    let libvirt = state.libvirt.lock().await;
     
-    match libvirt.lookup_domain(&vm_id) {
-        Ok(domain) => {
-            match gpu_manager.attach_gpu_to_vm(&gpu_id, &domain.get_xml_desc(0).unwrap_or_default()) {
-                Ok(_) => Ok(StatusCode::OK),
-                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
-        }
-        Err(_) => Err(StatusCode::NOT_FOUND),
-    }
+    let vm_metrics = metrics.get_vm_metrics(&id)
+        .map_err(handle_error)?;
+
+    Ok(Json(vm_metrics))
 }
