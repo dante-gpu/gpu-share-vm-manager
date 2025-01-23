@@ -1,6 +1,6 @@
-pub mod vm;
-pub mod libvirt;
+mod libvirt;
+mod vm;
 
 // exports for lazy devs like us
 pub use libvirt::LibvirtManager;
-pub use vm::{VirtualMachine, VMStatus, VMResources};
+pub use vm::VMStatus;  

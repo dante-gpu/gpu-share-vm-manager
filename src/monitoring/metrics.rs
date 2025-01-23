@@ -1,5 +1,5 @@
 /*
-* Hey fellow @virjilakrum from DanteGPU! 👋
+* Hey fellow @virjilakrum again from DanteGPU! 👋
 * 
 * Welcome to our metrics collection wonderland - where we track resources like 
 * Elon's Neuralink tracks your thoughts (just kidding, we're more reliable!)
@@ -83,7 +83,7 @@ impl MetricsCollector {
         
         let interval = self.collection_interval;
         let retention_hours = self.history_retention_hours;
-        let metrics_store = self.vm_metrics.clone();
+        let mut metrics_store = self.vm_metrics.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = time::interval(interval);
@@ -108,18 +108,17 @@ impl MetricsCollector {
     }
 
     async fn collect_vm_metrics(domain: &virt::domain::Domain) -> Result<ResourceMetrics> {
-        let mem_stats = domain.memory_stats()?;
-        let cpu_stats = domain.get_cpu_stats(true)?;
+        let info = domain.get_info()?;
+        let memory_stats = domain.memory_stats(0)?;
+        let job_stats = domain.get_job_stats(0)?;
+
+        // Memory bilgilerini info'dan al
+        let memory_used = info.memory / 1024;  // KiB to MiB
+        let memory_total = info.max_mem / 1024;
 
         // Calculate CPU usage
-        let cpu_time = cpu_stats.iter()
-            .map(|stats| stats.cpu_time)
-            .sum::<u64>();
+        let cpu_time = job_stats.time_elapsed.unwrap_or(0);
         let cpu_usage = Self::calculate_cpu_usage(cpu_time);
-
-        // Get memory usage
-        let memory_used = mem_stats.get("actual").unwrap_or(&0) / 1024; // Convert to MB
-        let memory_total = mem_stats.get("available").unwrap_or(&0) / 1024;
 
         // Collect GPU metrics if available
         let gpu_metrics = Self::collect_gpu_metrics(domain).await?;

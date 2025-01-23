@@ -5,18 +5,26 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
-virt = "0.3.0"  
+virt = "0.4.1"  
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"  
 async-trait = "0.1"
-config = "0.14"
-axum = "0.6"
-tower = "0.4"
-tower-http = { version = "0.4", features = ["trace"] }
+config = "0.15.6"
+axum = "0.8.1"
+tower = "0.5.2"
+tower-http = { version = "0.6.2", features = ["trace"] }
 clap = { version = "4.4", features = ["derive"] }
-colored = "2.0"
-thiserror = "1.0"
+colored = "3.0"
+thiserror = "2.0.11"
 chrono = "0.4"
+
+[lib]
+name = "gpu_share_vm_manager"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gpu-share-vm-manager"
+path = "src/main.rs"

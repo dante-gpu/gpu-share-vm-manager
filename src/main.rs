@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, error};
+use tracing::info;
 
 mod core;
 mod gpu;

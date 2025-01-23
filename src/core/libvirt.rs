@@ -5,6 +5,7 @@ use virt::domain::Domain;
 // use virt::sys;
 
 // time to manage some VMs! >.
+#[allow(dead_code)]  
 pub struct LibvirtManager {
     conn: Connect,
 }
@@ -113,13 +114,4 @@ impl LibvirtManager {
             Err(e) => Err(anyhow::anyhow!("Failed to list inactive domains: {}", e))
         }
     }
-}
-
-// oof size: LARGE - error handling time
-#[derive(Debug, thiserror::Error)]
-pub enum LibvirtError {
-    #[error("Connection failed: {0}")]
-    ConnectionError(String),
-    #[error("VM operation failed: {0}")]
-    VMError(String),
 }
