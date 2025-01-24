@@ -183,3 +183,38 @@ fn test_system_requirements() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_macos_system_requirements() -> Result<(), Box<dyn std::error::Error>> {
+    // Check if Hypervisor framework is available
+    let hypervisor = std::process::Command::new("sysctl")
+        .args(&["-n", "kern.hv_support"])
+        .output()?;
+    let hypervisor_output = String::from_utf8_lossy(&hypervisor.stdout);
+    assert!(
+        hypervisor_output.trim() == "1",
+        "Hypervisor framework is not available on this Mac"
+    );
+
+    // Verify QEMU installation
+    let qemu = std::process::Command::new("which")
+        .arg("qemu-system-x86_64")
+        .output()?;
+    assert!(
+        qemu.status.success(),
+        "QEMU is not installed. Please install via Homebrew: brew install qemu"
+    );
+
+    // Check virtualization extensions
+    let sysctl = std::process::Command::new("sysctl")
+        .args(&["-n", "machdep.cpu.features"])
+        .output()?;
+    let cpu_features = String::from_utf8_lossy(&sysctl.stdout);
+    assert!(
+        cpu_features.contains("VMX"),
+        "Intel VT-x/AMD-V virtualization extensions are not available"
+    );
+
+    Ok(())
+}
