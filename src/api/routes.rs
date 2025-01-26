@@ -265,7 +265,7 @@ async fn delete_vm(
 async fn list_gpus(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<GPUDevice>>, StatusCode> {
-    let gpu_manager = state.gpu_manager.lock().await;
+    let mut gpu_manager = state.gpu_manager.lock().await;
     
     let gpus = gpu_manager.discover_gpus()
         .map_err(handle_error)?;

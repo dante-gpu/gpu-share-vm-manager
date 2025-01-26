@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 // use tracing::{info, warn, error};
 use std::fs::{self};
-// use std::path::Path;
+use std::path::Path;
 use std::process::Command;
 // use std::path::PathBuf;
 
@@ -71,7 +71,7 @@ impl GPUManager {
     }
 
     // Time to introduce our GPU to its new VM friend! 🤝
-    pub async fn attach_gpu_to_vm(&mut self, domain: &virt::domain::Domain, config: &GPUConfig) -> Result<String, anyhow::Error> {
+    pub async fn attach_gpu_to_vm(&mut self, _domain: &virt::domain::Domain, config: &GPUConfig) -> Result<String, anyhow::Error> {
         // Validate GPU exists and is available
         let gpu = self.devices.iter()
             .find(|g| g.id == config.gpu_id)
@@ -113,9 +113,8 @@ fn has_required_permissions() -> bool {
 }
 
 // Add these helper functions
-fn is_gpu_device(vendor: &str, device: &str) -> bool {
+fn is_gpu_device(vendor: &str, _device: &str) -> bool {
     let vendor = vendor.trim();
-    let device = device.trim();
     // NVIDIA, AMD, Intel vendor IDs
     vendor == "10de" || vendor == "1002" || vendor == "8086"
 }
