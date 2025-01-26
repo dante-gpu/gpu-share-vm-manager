@@ -21,6 +21,8 @@ pub struct GPUDevice {
     pub device_id: String,      // Model number - because we're all unique!
     pub pci_address: String,    // Where to find this beauty on the PCI runway
     pub iommu_group: Option<String>, // The VIP lounge number (if we're fancy enough)
+    pub temperature: f64,        // Temperature of the GPU
+    pub utilization: f64,         // Utilization of the GPU
 }
 
 // The mastermind behind our GPU operations! 🧙‍♂️
@@ -37,9 +39,29 @@ impl GPUManager {
     }
 
     // Let's discover what GPUs are hiding in this machine! 🔍
-    pub fn discover_gpus(&self) -> Result<Vec<GPUDevice>, anyhow::Error> {
-        // TODO: Implement actual GPU discovery
-        Ok(self.devices.clone())
+    pub fn discover_gpus(&mut self) -> Result<Vec<GPUDevice>> {
+        let mut devices = Vec::new();
+        let pci_devices = fs::read_dir("/sys/bus/pci/devices")?;
+        
+        for entry in pci_devices {
+            let path = entry?.path();
+            let vendor = fs::read_to_string(path.join("vendor"))?;
+            let device = fs::read_to_string(path.join("device"))?;
+            
+            if is_gpu_device(&vendor, &device) {
+                let iommu_group = get_iommu_group(&path)?;
+                devices.push(GPUDevice {
+                    id: format!("{:x}:{:x}", vendor.trim(), device.trim()),
+                    vendor_id: vendor.trim().to_string(),
+                    device_id: device.trim().to_string(),
+                    pci_address: path.file_name().unwrap().to_str().unwrap().to_string(),
+                    iommu_group,
+                    temperature: read_gpu_temperature(&path)?,
+                    utilization: read_gpu_utilization(&path)?,
+                });
+            }
+        }
+        Ok(devices)
     }
 
     // Assign those GPUs to their IOMMU groups - like assigning students to classrooms! 🏫
