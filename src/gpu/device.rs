@@ -1,10 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-// use tracing::{info, warn, error};
+use tracing::warn;
 use std::fs::{self};
 use std::path::Path;
 use std::process::Command;
-// use std::path::PathBuf;
+use std::collections::HashMap;
 
 // GPU Configuration - Because every GPU needs its marching orders! 🎮
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -13,7 +13,7 @@ pub struct GPUConfig {
     pub iommu_group: String,    // IOMMU group - keeping our GPU in its own VIP section
 }
 
-// Our GPU Device - The silicon celebrity of our virtual world! ⭐
+// Our GPU Device - The silicon celebrity of our virtual world! 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUDevice {
     pub id: String,             // Every star needs a unique name
@@ -64,10 +64,57 @@ impl GPUManager {
         Ok(devices)
     }
 
-    // Assign those GPUs to their IOMMU groups - like assigning students to classrooms! 🏫
+    // Assign those GPUs to their IOMMU groups - like assigning students to classrooms! 
+    #[allow(dead_code)]
     pub fn assign_iommu_groups(&mut self) -> Result<()> {
-        // TODO: Implement IOMMU group assignment
+        // Scan all PCI devices to create IOMMU groups
+        let mut iommu_groups = HashMap::new();
+        let pci_devices = fs::read_dir("/sys/bus/pci/devices")?;
+
+        for entry in pci_devices {
+            let path = entry?.path();
+            if let Some(group) = get_iommu_group(&path)? {
+                let devices = iommu_groups.entry(group).or_insert(Vec::new());
+                devices.push(path);
+            }
+        }
+
+        // Match GPUs with their corresponding IOMMU groups
+        for gpu in &mut self.devices {
+            // Find IOMMU group from GPU's PCI address
+            let pci_path = Path::new("/sys/bus/pci/devices").join(&gpu.pci_address);
+            if let Some(group) = get_iommu_group(&pci_path)? {
+                // Collect all devices in the group
+                let group_devices = iommu_groups.get(&group)
+                    .ok_or_else(|| anyhow::anyhow!("IOMMU group not found"))?;
+
+                // Validate group safety
+                if !Self::is_safe_iommu_group(group_devices) {
+                    warn!("Unsafe IOMMU group {} for GPU {}", group, gpu.id);
+                    continue;
+                }
+
+                // Assign group info to GPU
+                gpu.iommu_group = Some(group.clone());
+                
+                // Log all devices in group (optional)
+                // debug!("GPU {} assigned to IOMMU group {} with devices: {:?}", 
+                //     gpu.id, group, group_devices);
+            }
+        }
+
         Ok(())
+    }
+
+    // IOMMU grubunun güvenli olduğunu kontrol et
+    fn is_safe_iommu_group(devices: &[std::path::PathBuf]) -> bool {
+        // A group should only contain GPU and audio controller
+        devices.iter().all(|path| {
+            let class = fs::read_to_string(path.join("class"))
+                .unwrap_or_default();
+            class.starts_with("0x0300") || // GPU
+            class.starts_with("0x0403")    // Ses kontrolcüsü
+        })
     }
 
     // Time to introduce our GPU to its new VM friend! 🤝
@@ -120,7 +167,14 @@ fn is_gpu_device(vendor: &str, _device: &str) -> bool {
 }
 
 fn get_iommu_group(path: &Path) -> Result<Option<String>> {
-    let iommu_link = fs::read_link(path.join("iommu_group"))?;
+    let iommu_link = match fs::read_link(path.join("iommu_group")) {
+        Ok(link) => link,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     Ok(Some(
         iommu_link
             .to_str()
