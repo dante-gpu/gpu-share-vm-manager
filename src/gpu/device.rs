@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, error};
+// use tracing::{info, warn, error};
 use std::fs::{self};
-use std::path::Path;
+// use std::path::Path;
 use std::process::Command;
 // use std::path::PathBuf;
 
@@ -51,7 +51,7 @@ impl GPUManager {
             if is_gpu_device(&vendor, &device) {
                 let iommu_group = get_iommu_group(&path)?;
                 devices.push(GPUDevice {
-                    id: format!("{:x}:{:x}", vendor.trim(), device.trim()),
+                    id: format!("{}:{}", vendor.trim(), device.trim()),
                     vendor_id: vendor.trim().to_string(),
                     device_id: device.trim().to_string(),
                     pci_address: path.file_name().unwrap().to_str().unwrap().to_string(),
@@ -110,4 +110,35 @@ fn has_required_permissions() -> bool {
         // TODO: Windows admin check would go here -@virjilakrum
         true // Placeholder for Windows implementation
     }
+}
+
+// Add these helper functions
+fn is_gpu_device(vendor: &str, device: &str) -> bool {
+    let vendor = vendor.trim();
+    let device = device.trim();
+    // NVIDIA, AMD, Intel vendor IDs
+    vendor == "10de" || vendor == "1002" || vendor == "8086"
+}
+
+fn get_iommu_group(path: &Path) -> Result<Option<String>> {
+    let iommu_link = fs::read_link(path.join("iommu_group"))?;
+    Ok(Some(
+        iommu_link
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid IOMMU group path"))?
+            .split('/')
+            .last()
+            .unwrap()
+            .to_string(),
+    ))
+}
+
+fn read_gpu_temperature(path: &Path) -> Result<f64> {
+    let temp_str = fs::read_to_string(path.join("temp1_input"))?.trim().to_string();
+    Ok(temp_str.parse::<f64>()? / 1000.0)
+}
+
+fn read_gpu_utilization(path: &Path) -> Result<f64> {
+    let util_str = fs::read_to_string(path.join("gpu_busy_percent"))?.trim().to_string();
+    Ok(util_str.parse()?)
 }

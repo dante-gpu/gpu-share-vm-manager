@@ -11,12 +11,12 @@ RUN apt-get update && apt-get install -y \
 
 # Cache dependencies
 RUN cargo install cargo-chef
-COPY Cargo.toml Cargo.lock .
+COPY Cargo.toml Cargo.lock ./
 RUN cargo chef prepare --recipe-path recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy source code
-COPY . .
+COPY . ./
 
 # Build application
 RUN cargo build --release --locked
