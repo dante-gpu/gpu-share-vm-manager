@@ -148,73 +148,132 @@ async fn test_real_metrics_collection() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Kernel module and IOMMU tests
+// Platform-specific system requirement checks
 #[test]
 fn test_system_requirements() -> Result<(), Box<dyn std::error::Error>> {
-    // IOMMU control
-
-    let dmesg = std::process::Command::new("dmesg")
-        .output()?;
-    let dmesg_output = String::from_utf8_lossy(&dmesg.stdout);
-    assert!(
-        dmesg_output.contains("IOMMU") || dmesg_output.contains("AMD-Vi"),
-        "IOMMU is not active"
-    );
-
-    // Required kernel modules
-    let modules = [
-        "vfio",
-        "vfio_pci",
-        "vfio_iommu_type1",
-        "kvm",
-        "kvm_intel",  // or kvm_amd
-    ];
-
-    for module in modules {
-        let lsmod = std::process::Command::new("lsmod")
-            .output()?;
-        let output = String::from_utf8_lossy(&lsmod.stdout);
+    // Common checks for all platforms
+    #[cfg(target_os = "linux")] {
+        // Check IOMMU support through kernel messages
+        let dmesg = std::process::Command::new("dmesg").output()?;
+        let dmesg_output = String::from_utf8_lossy(&dmesg.stdout);
         assert!(
-            output.contains(module),
-                "Kernel module {} not loaded", 
-            module
+            dmesg_output.contains("IOMMU") || dmesg_output.contains("AMD-Vi"),
+            "IOMMU not enabled in kernel parameters"
+        );
+
+        // Verify required kernel modules using /proc/modules
+        let modules_file = std::fs::read_to_string("/proc/modules")?;
+        let required_modules = ["vfio", "vfio_pci", "vfio_iommu_type1", "kvm"];
+        for module in required_modules {
+            assert!(
+                modules_file.contains(module),
+                "Required kernel module {} not loaded",
+                module
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")] {
+        // Verify macOS hypervisor capabilities
+        let hypervisor = std::process::Command::new("sysctl")
+            .args(["-n", "kern.hv_support"])
+            .output()?;
+        assert!(
+            String::from_utf8_lossy(&hypervisor.stdout).trim() == "1",
+            "Hypervisor framework not available"
+        );
+
+        // Check QEMU installation
+        let qemu_check = std::process::Command::new("which")
+            .arg("qemu-system-x86_64")
+            .status()?;
+        assert!(
+            qemu_check.success(),
+            "QEMU not found in PATH, install via 'brew install qemu'"
+        );
+    }
+
+    #[cfg(target_os = "windows")] {
+        // Verify Hyper-V capabilities
+        let hyperv = std::process::Command::new("powershell")
+            .args(["-Command", "Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V"])
+            .output()?;
+        let output = String::from_utf8_lossy(&hyperv.stdout);
+        assert!(
+            output.contains("Enabled"),
+            "Hyper-V not enabled on Windows system"
         );
     }
 
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+// Cross-platform virtualization extension check
 #[test]
-fn test_macos_system_requirements() -> Result<(), Box<dyn std::error::Error>> {
-    // Check if Hypervisor framework is available
-    let hypervisor = std::process::Command::new("sysctl")
-        .args(&["-n", "kern.hv_support"])
-        .output()?;
-    let hypervisor_output = String::from_utf8_lossy(&hypervisor.stdout);
-    assert!(
-        hypervisor_output.trim() == "1",
-        "Hypervisor framework is not available on this Mac"
-    );
+fn test_virtualization_support() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")] {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo")?;
+        assert!(
+            cpuinfo.contains("vmx") || cpuinfo.contains("svm"),
+            "Hardware virtualization extensions not detected"
+        );
+    }
 
-    // Verify QEMU installation
-    let qemu = std::process::Command::new("which")
-        .arg("qemu-system-x86_64")
-        .output()?;
-    assert!(
-        qemu.status.success(),
-        "QEMU is not installed. Please install via Homebrew: brew install qemu"
-    );
+    #[cfg(target_os = "macos")] {
+        let sysctl = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.features"])
+            .output()?;
+        let features = String::from_utf8_lossy(&sysctl.stdout);
+        assert!(
+            features.contains("VMX"),
+            "Intel VT-x virtualization extensions not available"
+        );
+    }
 
-    // Check virtualization extensions
-    let sysctl = std::process::Command::new("sysctl")
-        .args(&["-n", "machdep.cpu.features"])
-        .output()?;
-    let cpu_features = String::from_utf8_lossy(&sysctl.stdout);
-    assert!(
-        cpu_features.contains("VMX"),
-        "Intel VT-x/AMD-V virtualization extensions are not available"
-    );
+    #[cfg(target_os = "windows")] {
+        let systeminfo = std::process::Command::new("systeminfo")
+            .output()?;
+        let info = String::from_utf8_lossy(&systeminfo.stdout);
+        assert!(
+            info.contains("Virtualization Enabled In Firmware: Yes"),
+            "Virtualization not enabled in BIOS/UEFI"
+        );
+    }
 
+    Ok(())
+}
+
+// Platform-agnostic VM lifecycle test
+#[tokio::test]
+async fn test_cross_platform_vm_operations() -> anyhow::Result<()> {
+    let libvirt = setup_libvirt().await?;
+    
+    // Common VM configuration
+    let config = VMConfig {
+        name: "cross-platform-test".to_string(),
+        memory_kb: 2 * 1024 * 1024,
+        vcpus: 2,
+        disk_path: PathBuf::from("/var/lib/gpu-share/images/cross-platform-test.qcow2"),
+        disk_size_gb: 20,
+    };
+
+    // Basic VM operations
+    let vm = libvirt.create_vm(&config).await?;
+    vm.create()?;
+    assert!(vm.is_active()?, "VM failed to start");
+    
+    // Platform-specific resource checks
+    #[cfg(target_os = "linux")] {
+        let mem_stats = vm.memory_stats(0)?;
+        assert!(mem_stats.iter().any(|s| s.tag == 4), "Memory stats incomplete");
+    }
+    
+    #[cfg(target_os = "macos")] {
+        let xml = vm.get_xml_desc(0)?;
+        assert!(xml.contains("qemu:commandline"), "QEMU specific configuration missing");
+    }
+
+    vm.destroy()?;
+    vm.undefine()?;
     Ok(())
 }
