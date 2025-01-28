@@ -6,6 +6,15 @@ use std::path::PathBuf;
 // use tracing::{info, warn};
 use uuid::Uuid;
 
+#[derive(Clone)]
+struct LibvirtManagerWrapper(LibvirtManager);
+
+impl LibvirtManagerWrapper {
+    fn new() -> Result<Self> {
+        LibvirtManager::new().map(Self)
+    }
+}
+
 // Test setup: Creates a unique VM configuration to avoid conflicts
 fn test_vm_config() -> VMConfig {
     let uuid = Uuid::new_v4();
@@ -21,11 +30,11 @@ fn test_vm_config() -> VMConfig {
 // VM Lifecycle Test: Creation → Start → Stop → Delete
 #[tokio::test]
 async fn test_full_vm_lifecycle() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     let config = test_vm_config();
     
     // Phase 1: Create the VM
-    let vm = libvirt.create_vm(&config)
+    let vm = libvirt.0.create_vm(&config)
         .await
         .context("Failed to create VM")?;
     
@@ -44,7 +53,7 @@ async fn test_full_vm_lifecycle() -> Result<()> {
     vm.undefine()?;
     
     // Verify deletion
-    let exists = libvirt.lookup_domain(&config.name).is_ok();
+    let exists = libvirt.0.lookup_domain(&config.name).is_ok();
     assert!(!exists, "VM should be deleted");
 
     Ok(())
@@ -53,12 +62,12 @@ async fn test_full_vm_lifecycle() -> Result<()> {
 // Stress Test: Create multiple VMs simultaneously
 #[tokio::test]
 async fn test_concurrent_vm_creation() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     let mut handles = vec![];
     
     // Spawn 5 concurrent VM creations
     for i in 0..5 {
-        let libvirt_clone = libvirt.try_clone().expect("Clone failed");
+        let cloned = libvirt.clone();
         let config = VMConfig {
             name: format!("stress-test-vm-{}", i),
             memory_kb: 524_288, // 512MB
@@ -68,7 +77,7 @@ async fn test_concurrent_vm_creation() -> Result<()> {
         };
         
         handles.push(tokio::spawn(async move {
-            libvirt_clone.create_vm(&config).await
+            cloned.0.create_vm(&config).await
         }));
     }
 
@@ -86,7 +95,7 @@ async fn test_concurrent_vm_creation() -> Result<()> {
 // Error Case Test: Invalid VM configurations
 #[tokio::test]
 async fn test_invalid_vm_configurations() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     
     // Test 1: Insufficient memory
     let config = VMConfig {
@@ -97,7 +106,7 @@ async fn test_invalid_vm_configurations() -> Result<()> {
         disk_size_gb: 10,
     };
     
-    let result = libvirt.create_vm(&config).await;
+    let result = libvirt.0.create_vm(&config).await;
     assert!(result.is_err(), "Should reject insufficient memory");
 
     // Test 2: Invalid disk path
@@ -109,7 +118,7 @@ async fn test_invalid_vm_configurations() -> Result<()> {
         disk_size_gb: 10,
     };
     
-    let result = libvirt.create_vm(&config).await;
+    let result = libvirt.0.create_vm(&config).await;
     assert!(result.is_err(), "Should reject invalid disk path");
 
     Ok(())
@@ -118,9 +127,9 @@ async fn test_invalid_vm_configurations() -> Result<()> {
 // State Transition Test: Start → Reboot → Stop
 #[tokio::test]
 async fn test_vm_state_transitions() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     let config = test_vm_config();
-    let vm = libvirt.create_vm(&config).await?;
+    let vm = libvirt.0.create_vm(&config).await?;
 
     // Cold start
     vm.create()?;
@@ -142,9 +151,9 @@ async fn test_vm_state_transitions() -> Result<()> {
 // Snapshot Test: Create → Snapshot → Restore
 #[tokio::test]
 async fn test_vm_snapshots() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     let config = test_vm_config();
-    let vm = libvirt.create_vm(&config).await?;
+    let vm = libvirt.0.create_vm(&config).await?;
     vm.create()?;
 
     // Create snapshot
@@ -173,11 +182,11 @@ async fn test_vm_snapshots() -> Result<()> {
 // Resource Validation Test: CPU/Memory allocation
 #[tokio::test]
 async fn test_resource_allocation() -> Result<()> {
-    let libvirt = LibvirtManager::new()?;
+    let libvirt = LibvirtManagerWrapper::new()?;
     let config = test_vm_config();
     
     // Create VM with specific resources
-    let vm = libvirt.create_vm(&config)
+    let vm = libvirt.0.create_vm(&config)
         .await
         .context("Failed to create VM for resource test")?;
 
