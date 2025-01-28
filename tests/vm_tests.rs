@@ -214,3 +214,63 @@ async fn test_resource_allocation() -> Result<()> {
     
     Ok(())
 }
+
+// Network Configuration Test: Validate network interfaces and connectivity
+#[tokio::test]
+async fn test_vm_network_configuration() -> Result<()> {
+    let libvirt = LibvirtManagerWrapper::new()?;
+    let config = test_vm_config();
+    
+    // Create VM with network configuration
+    let vm = libvirt.0.create_vm(&config)
+        .await
+        .context("Failed to create VM for network test")?;
+    
+    vm.create()?;
+    
+    // Validate network interfaces
+    let interfaces = vm.get_interfaces()?;
+    assert!(!interfaces.is_empty(), "VM should have at least one network interface");
+    
+    // Basic connectivity check (ping gateway)
+    let active_iface = interfaces.first().unwrap();
+    let ping_result = vm.execute_command(&format!("ping -c 3 {}", active_iface.gateway)).await;
+    assert!(ping_result.is_ok(), "VM should have network connectivity");
+    
+    // Cleanup
+    vm.destroy()?;
+    vm.undefine()?;
+    Ok(())
+}
+
+// Negative Test: Duplicate VM creation and error handling
+#[tokio::test]
+async fn test_duplicate_vm_creation() -> Result<()> {
+    let libvirt = LibvirtManagerWrapper::new()?;
+    let config = test_vm_config();
+    
+    // First creation should succeed
+    let vm1 = libvirt.0.create_vm(&config)
+        .await
+        .context("First VM creation should succeed")?;
+    
+    // Second creation with same config should fail
+    let result = libvirt.0.create_vm(&config).await;
+    assert!(
+        result.is_err(),
+        "Should return error when creating duplicate VM"
+    );
+    
+    // Verify error type
+    if let Err(e) = result {
+        assert!(
+            e.to_string().contains("already exists"),
+            "Error should indicate duplicate VM"
+        );
+    }
+    
+    // Cleanup
+    vm1.destroy()?;
+    vm1.undefine()?;
+    Ok(())
+}
