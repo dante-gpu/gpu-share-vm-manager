@@ -42,6 +42,11 @@
 *    - vm_image_path: Where VM images go to hibernate
 *    - max_storage_gb: Because someone will try to store their entire Steam library
 *
+* 5. RateLimitSettings:
+*    - api_requests_per_minute: Rate limit for general API requests
+*    - gpu_requests_per_minute: Rate limit for GPU-related requests
+*    - auth_requests_per_minute: Rate limit for authentication-related requests
+*
 * Implementation Details:
 * --------------------
 * - Using serde for serialization (because writing parsers is so 1990s)
@@ -84,6 +89,7 @@ pub struct Settings {
     pub libvirt: LibvirtSettings,
     pub monitoring: MonitoringSettings,
     pub storage: StorageSettings,
+    pub rate_limits: RateLimitSettings,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -112,6 +118,23 @@ pub struct MonitoringSettings {
 pub struct StorageSettings {
     pub vm_image_path: PathBuf,
     pub max_storage_gb: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RateLimitSettings {
+    pub api_requests_per_minute: u32,
+    pub gpu_requests_per_minute: u32,
+    pub auth_requests_per_minute: u32,
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        Self {
+            api_requests_per_minute: 100,
+            gpu_requests_per_minute: 30,
+            auth_requests_per_minute: 10,
+        }
+    }
 }
 
 impl Settings {
@@ -160,6 +183,11 @@ pub fn generate_default_config() -> Settings {
         storage: StorageSettings {
             vm_image_path: PathBuf::from("/var/lib/gpu-share/images"),
             max_storage_gb: 100,
+        },
+        rate_limits: RateLimitSettings {
+            api_requests_per_minute: 100,
+            gpu_requests_per_minute: 30,
+            auth_requests_per_minute: 10,
         },
     }
 }

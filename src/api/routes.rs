@@ -63,6 +63,7 @@ use axum::{
     extract::{Path, State},
     Json,
     http::StatusCode,
+    response::{IntoResponse},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -74,6 +75,7 @@ use crate::core::libvirt::LibvirtManager;
 use crate::core::vm::{VMStatus, VMConfig};
 use crate::gpu::device::{GPUManager, GPUDevice, GPUConfig};
 use crate::monitoring::metrics::{MetricsCollector, ResourceMetrics};
+use crate::api::middleware::rate_limit::{rate_limit_layer, GlobalRateLimit, RateLimitExceeded};
 
 fn handle_error(err: impl std::fmt::Display) -> StatusCode {
     error!("Operation failed: {}", err);
@@ -112,17 +114,39 @@ pub struct AttachGPURequest {
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    let rate_limits = GlobalRateLimit::default();
+
     Router::new()
+        // Public endpoints with stricter limits
+        .route("/api/v1/auth/login", post(login))
+        .layer(rate_limit_layer(rate_limits.auth.clone()))
+        
+        // GPU operations with specific limits
+        .route("/api/v1/gpus", get(list_gpus))
+        .route("/api/v1/vms/:id/attach_gpu", post(attach_gpu))
+        .layer(rate_limit_layer(rate_limits.gpu_operations.clone()))
+        
+        // General API endpoints
         .route("/api/v1/vms", post(create_vm))
         .route("/api/v1/vms", get(list_vms))
         .route("/api/v1/vms/:id", get(get_vm))
         .route("/api/v1/vms/:id", delete(delete_vm))
         .route("/api/v1/vms/:id/start", post(start_vm))
         .route("/api/v1/vms/:id/stop", post(stop_vm))
-        .route("/api/v1/gpus", get(list_gpus))
-        .route("/api/v1/vms/:id/attach_gpu", post(attach_gpu))
         .route("/api/v1/metrics/:id", get(get_metrics))
+        .layer(rate_limit_layer(rate_limits.api.clone()))
+        
+        // Shared state and fallback
         .with_state(state)
+        .fallback(fallback_handler)
+        .layer(HandleErrorLayer::new(handle_error))
+}
+
+async fn handle_error(error: Box<dyn std::error::Error + Send + Sync>) -> impl IntoResponse {
+    if error.is::<RateLimitExceeded>() {
+        return RateLimitExceeded.into_response();
+    }
+    // ... existing error handling ...
 }
 
 #[axum::debug_handler]
