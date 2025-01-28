@@ -136,7 +136,7 @@ async fn test_vm_state_transitions() -> Result<()> {
     assert!(vm.is_active()?, "VM should be running");
 
     // Reboot
-    vm.reboot()?;
+    vm.reboot(0)?;
     assert!(vm.is_active()?, "VM should stay running after reboot");
 
     // Graceful shutdown
