@@ -63,7 +63,7 @@ use axum::{
     extract::{Path, State},
     Json,
     http::StatusCode,
-    response::{IntoResponse},
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
