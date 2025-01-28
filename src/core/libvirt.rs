@@ -6,6 +6,7 @@ use crate::core::vm::VMConfig;
 // use virt::sys;
 
 // time to manage some VMs! >.
+#[derive(Clone)]
 #[allow(dead_code)]  
 pub struct LibvirtManager {
     conn: Connect,
@@ -78,12 +79,10 @@ impl LibvirtManager {
     }
     
     pub fn lookup_domain(&self, id: &str) -> Result<Domain> {
-        // Önce UUID olarak dene
         if let Ok(domain) = Domain::lookup_by_uuid_string(&self.conn, id) {
             return Ok(domain);
         }
         
-        // UUID olarak bulunamazsa isim olarak dene
         match Domain::lookup_by_name(&self.conn, id) {
             Ok(domain) => Ok(domain),
             Err(e) => Err(anyhow::anyhow!("Failed to find domain: {}", e))

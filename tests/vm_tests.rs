@@ -1,7 +1,7 @@
 // Virtual Machine Test Suite - Because untested code is like Schrödinger's cat! 🐱💻
 
 use anyhow::{Context, Result};
-use gpu_share_vm_manager::core::{LibvirtManager, vm::{VMConfig, VMStatus}};
+use gpu_share_vm_manager::core::{LibvirtManager, vm::VMConfig};
 use std::path::PathBuf;
 // use tracing::{info, warn};
 use uuid::Uuid;
@@ -156,23 +156,26 @@ async fn test_vm_snapshots() -> Result<()> {
     let vm = libvirt.0.create_vm(&config).await?;
     vm.create()?;
 
-    // Create snapshot
-    let snapshot_xml = format!(r#"
-        <domainsnapshot>
-            <name>{}</name>
-            <description>{}</description>
-        </domainsnapshot>"#,
-        "test-snapshot",
-        "Initial state"
-    );
-    vm.snapshot_create_xml(&snapshot_xml, 0)?;
-
-    // Restore snapshot
-    let snapshot = vm.snapshot_lookup_by_name("test-snapshot")?;
-    vm.snapshot_revert(snapshot, 0)?;
+    // Create snapshot with proper XML structure
+    let snapshot_xml = r#"
+    <domainsnapshot>
+        <name>test-snapshot</name>
+        <description>Initial state</description>
+        <memory snapshot='no'/>
+    </domainsnapshot>"#;
     
-    let restored_xml = vm.get_xml_desc(0)?;
-    assert_eq!(restored_xml, vm.get_xml_desc(0)?, "XML should match snapshot");
+    // Create snapshot and verify
+    let snapshot = vm.snapshot_create_xml(snapshot_xml, 0)
+        .context("Failed to create snapshot")?;
+    assert_eq!(snapshot.get_name()?, "test-snapshot");
+
+    // Revert to snapshot
+    vm.snapshot_revert(snapshot, 0)
+        .context("Failed to revert snapshot")?;
+
+    // Cleanup snapshot
+    let current_snapshot = vm.snapshot_current(0)?;
+    current_snapshot.delete(0)?;
 
     vm.destroy()?;
     vm.undefine()?;

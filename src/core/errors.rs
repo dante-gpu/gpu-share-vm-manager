@@ -18,15 +18,14 @@ pub enum GpuShareError {
     UnknownError(String),
 }
 
-// Implement From traits for common error conversions
-impl From<libvirt::error::Error> for GpuShareError {
-    fn from(err: libvirt::error::Error) -> Self {
-        GpuShareError::ConnectionError(err.to_string())
-    }
-}
-
 impl From<std::io::Error> for GpuShareError {
     fn from(err: std::io::Error) -> Self {
         GpuShareError::ConfigError(err.to_string())
     }
-} 
+}
+
+impl From<virt::error::Error> for GpuShareError {
+    fn from(error: virt::error::Error) -> Self {
+        GpuShareError::ConnectionError(error.to_string())
+    }
+}
