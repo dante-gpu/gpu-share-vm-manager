@@ -64,6 +64,9 @@ use axum::{
     Json,
     http::StatusCode,
     response::IntoResponse,
+    response::{Json, Response},
+    http::Request,
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -82,10 +85,13 @@ fn handle_error(err: impl std::fmt::Display) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
 }
 
+#[derive(Clone)]
 pub struct AppState {
     pub libvirt: Arc<Mutex<LibvirtManager>>,
     pub gpu_manager: Arc<Mutex<GPUManager>>,
     pub metrics: Arc<Mutex<MetricsCollector>>,
+    pub shutdown_signal: Arc<Mutex<tokio::sync::oneshot::Sender<()>>>,
+    pub shutdown_receiver: Arc<Mutex<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +101,8 @@ pub struct CreateVMRequest {
     pub memory_mb: u64,
     pub gpu_required: bool,
     pub disk_size_gb: Option<u64>,
+    // pub username: String,
+    // pub password: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,14 +154,42 @@ async fn handle_error(error: Box<dyn std::error::Error + Send + Sync>) -> impl I
     if error.is::<RateLimitExceeded>() {
         return RateLimitExceeded.into_response();
     }
-    // ... existing error handling ...
+    
+    if let Some(libvirt_error) = error.downcast_ref::<libvirt::Error>() {
+        match libvirt_error.code() {
+            libvirt::ErrorNumber::NO_DOMAIN => {
+                return (StatusCode::NOT_FOUND, "VM not found").into_response()
+            }
+            libvirt::ErrorNumber::OPERATION_INVALID => {
+                return (StatusCode::BAD_REQUEST, "Invalid operation").into_response()
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(gpu_error) = error.downcast_ref::<gpu::GPUError>() {
+        match gpu_error {
+            gpu::GPUError::NotFound => {
+                return (StatusCode::NOT_FOUND, "GPU not found").into_response()
+            }
+            gpu::GPUError::AlreadyAttached => {
+                return (StatusCode::CONFLICT, "GPU already attached").into_response()
+            }
+            _ => {}
+        }
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Internal server error: {}", error),
+    )
+        .into_response()
 }
 
 #[axum::debug_handler]
 async fn create_vm(
     State(state): State<Arc<AppState>>,
-    Json(params): Json<CreateVMRequest>,
-) -> Result<Json<VMResponse>, StatusCode> {
+    Json(params): Json<CreateVMRequest>
+) -> Result<impl IntoResponse, StatusCode> {
     let libvirt = state.libvirt.lock().await;
     
     let config = VMConfig {
@@ -188,8 +224,8 @@ async fn create_vm(
 
 #[axum::debug_handler]
 async fn list_vms(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<VMResponse>>, StatusCode> {
+    State(state): State<Arc<AppState>>
+) -> Result<impl IntoResponse, StatusCode> {
     let libvirt = state.libvirt.lock().await;
     
     let domains = libvirt.list_domains()
@@ -220,8 +256,8 @@ async fn list_vms(
 #[axum::debug_handler]
 async fn get_vm(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<VMResponse>, StatusCode> {
+    Path(id): Path<String>
+) -> Result<impl IntoResponse, StatusCode> {
     let libvirt = state.libvirt.lock().await;
     
     let domain = libvirt.lookup_domain(&id)
@@ -258,53 +294,64 @@ async fn start_vm(
 }
 
 #[axum::debug_handler]
+async fn start_vm(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>
+) -> Result<impl IntoResponse, StatusCode> {
+    let libvirt = state.libvirt.lock().await;
+    libvirt.start_vm(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
+}
+
+#[axum::debug_handler]
 async fn stop_vm(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+    Path(id): Path<String>
+) -> Result<impl IntoResponse, StatusCode> {
     let libvirt = state.libvirt.lock().await;
-    
-    libvirt.stop_domain(&id)
+    libvirt.stop_vm(&id)
         .await
-        .map_err(handle_error)?;
-
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
 
 #[axum::debug_handler]
-async fn delete_vm(
+async fn login(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
-    
-    libvirt.delete_domain(&id)
-        .await
+    Json(credentials): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, StatusCode> {
+    let mut libvirt = state.libvirt.lock().await;
+
+    let domain = libvirt.lookup_domain(&credentials.username)
         .map_err(handle_error)?;
 
-    Ok(StatusCode::OK)
-}
-
-#[axum::debug_handler]
-async fn list_gpus(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<GPUDevice>>, StatusCode> {
-    let mut gpu_manager = state.gpu_manager.lock().await;
-    
-    let gpus = gpu_manager.discover_gpus()
+    let info = domain.get_info()
         .map_err(handle_error)?;
-
-    Ok(Json(gpus))
 }
+
+// async fn login(
+// #[axum::debug_handler]
+// async fn list_gpus(
+//     State(state): State<Arc<AppState>>
+// ) -> Result<impl IntoResponse, StatusCode> {
+//     let gpu_manager = state.gpu_manager.lock().await;
+//     let gpus = gpu_manager.list_gpus()
+//         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+//     Ok(Json(gpus))
+// }
 
 #[axum::debug_handler]
 async fn attach_gpu(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(request): Json<AttachGPURequest>,
-) -> Result<StatusCode, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
+    Json(request): Json<GPUConfig>
+) -> Result<impl IntoResponse, StatusCode> {
     let mut gpu_manager = state.gpu_manager.lock().await;
+
+    let gpu_id = request.gpu_id.clone();
+    let gpu_manager = state.gpu_manager.lock().await;
     
     let domain = libvirt.lookup_domain(&id)
         .map_err(handle_error)?;
@@ -324,14 +371,21 @@ async fn attach_gpu(
 }
 
 #[axum::debug_handler]
+async fn fallback_handler(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Result<Response, StatusCode> {
+    error!("Fallback handler called for request: {:?}", req);
+    Err(StatusCode::NOT_FOUND)
+}
+
+#[axum::debug_handler]
 async fn get_metrics(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Vec<ResourceMetrics>>, StatusCode> {
+    Path(id): Path<String>
+) -> Result<impl IntoResponse, StatusCode> {
     let metrics = state.metrics.lock().await;
-    
     let vm_metrics = metrics.get_vm_metrics(&id)
-        .map_err(handle_error)?;
-
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Json(vm_metrics))
 }

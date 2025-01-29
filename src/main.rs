@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 mod core;
 mod gpu;
@@ -24,11 +25,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         24, // 24 hour retention
     )));
 
+    // Shutdown mechanism for graceful shutdown
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+
     // Initialize application state
     let state = Arc::new(api::AppState {
         libvirt,
         gpu_manager,
         metrics,
+        shutdown_signal: Arc::new(Mutex::new(shutdown_sender)),
+        shutdown_receiver: Arc::new(Mutex::new(shutdown_receiver)),
     });
 
     // Create API router
