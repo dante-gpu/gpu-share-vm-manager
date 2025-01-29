@@ -25,6 +25,17 @@ uuid = { version = "1.8.0", features = ["v4"] }
 libvirt = "0.1.0"
 governor = { version = "0.8.0", features = ["std", "nohashmap"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libvirt = "0.1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24.0"
+metal = { version = "0.31.0", features = ["private"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["dxgi", "d3dcommon"] }
+dxgi = "0.1.7"
+
 [lib]
 name = "gpu_share_vm_manager"
 path = "src/lib.rs"

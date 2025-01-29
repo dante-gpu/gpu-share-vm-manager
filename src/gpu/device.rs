@@ -195,3 +195,39 @@ fn read_gpu_utilization(path: &Path) -> Result<f64> {
     let util_str = fs::read_to_string(path.join("gpu_busy_percent"))?.trim().to_string();
     Ok(util_str.parse()?)
 }
+
+#[cfg(target_os = "linux")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    // Linux-specific implementation using sysfs
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "macos")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    use core_graphics::display::CGDisplay;
+    let mut gpus = Vec::new();
+    for display in CGDisplay::active_displays()? {
+        gpus.push(GPUDevice {
+            id: format!("display-{}", display),
+            vendor_id: "Apple".into(),
+            // MacOS specific GPU info
+        });
+    }
+    Ok(gpus)
+}
+
+#[cfg(target_os = "windows")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    // Windows implementation using DXGI
+    use dxgi::Factory;
+    let factory = Factory::new()?;
+    let mut gpus = Vec::new();
+    for adapter in factory.adapters() {
+        gpus.push(GPUDevice {
+            id: adapter.get_info().name,
+            vendor_id: "NVIDIA/AMD/Intel".into(),
+            // Windows specific data
+        });
+    }
+    Ok(gpus)
+}

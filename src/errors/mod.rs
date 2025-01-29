@@ -76,6 +76,17 @@ pub enum GpuError {
         message: String,
         driver_name: String,
     },
+
+    #[cfg(target_os = "macos")]
+    #[error("Metal API error: {0}")]
+    MetalError(String),
+    
+    #[cfg(target_os = "windows")]
+    #[error("DXGI error: {0}")]
+    DxgiError(#[from] dxgi::Error),
+    
+    #[error("Unsupported operation on {0}")]
+    UnsupportedPlatform(String),
 }
 
 #[derive(Debug)]

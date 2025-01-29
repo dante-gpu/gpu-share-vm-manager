@@ -79,6 +79,7 @@ use crate::core::vm::{VMStatus, VMConfig};
 use crate::gpu::device::{GPUManager, GPUDevice, GPUConfig};
 use crate::monitoring::metrics::{MetricsCollector, ResourceMetrics};
 use crate::api::middleware::rate_limit::{rate_limit_layer, GlobalRateLimit, RateLimitExceeded};
+use crate::utils::os::{current_platform};
 
 fn handle_error(err: impl std::fmt::Display) -> StatusCode {
     error!("Operation failed: {}", err);
@@ -200,6 +201,26 @@ async fn create_vm(
         disk_size_gb: params.disk_size_gb.unwrap_or(20),
     };
     
+    #[cfg(target_os = "linux")]
+    {
+        // Linux-specific VM creation
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // MacOS hypervisor framework usage
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Hyper-V integration
+    }
+    
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        return Err(Error::UnsupportedPlatform(current_platform().to_string()));
+    }
+
     let vm = libvirt.create_vm(&config).await
         .map_err(handle_error)?;
 
