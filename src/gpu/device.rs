@@ -5,6 +5,7 @@ use std::fs::{self};
 use std::path::Path;
 use std::process::Command;
 use std::collections::HashMap;
+use utils::os::Platform;
 
 // GPU Configuration - Because every GPU needs its marching orders! 🎮
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -17,12 +18,16 @@ pub struct GPUConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUDevice {
     pub id: String,             // Every star needs a unique name
-    pub vendor_id: String,      // Who's your manufacturer? 🏭
-    pub device_id: String,      // Model number - because we're all unique!
-    pub pci_address: String,    // Where to find this beauty on the PCI runway
-    pub iommu_group: Option<String>, // The VIP lounge number (if we're fancy enough)
-    pub temperature: f64,        // Temperature of the GPU
-    pub utilization: f64,         // Utilization of the GPU
+    pub vendor: String,         // Who's your manufacturer? 🏭
+    pub model: String,          // Model number - because we're all unique!
+    pub vram_mb: u64,          // VRAM in MB
+    pub driver_version: String, // GPU driver version
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_support: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulkan_support: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directx_version: Option<f32>,
 }
 
 // The mastermind behind our GPU operations! 🧙‍♂️
@@ -38,30 +43,85 @@ impl GPUManager {
         })
     }
 
-    // Let's discover what GPUs are hiding in this machine! 🔍
-    pub fn discover_gpus(&mut self) -> Result<Vec<GPUDevice>> {
-        let mut devices = Vec::new();
-        let pci_devices = fs::read_dir("/sys/bus/pci/devices")?;
+    /// Unified GPU detection across platforms
+    pub fn detect_gpus(&mut self) -> Result<()> {
+        match Platform::current() {
+            Platform::Linux => self.detect_linux_gpus(),
+            Platform::MacOS => self.detect_macos_gpus(),
+            Platform::Windows => self.detect_windows_gpus(),
+            _ => Err(GpuError::UnsupportedPlatform(
+                "Unknown platform".to_string()
+            )),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn detect_linux_gpus(&mut self) -> Result<()> {
+        use nvml_wrapper::Nvml;
         
-        for entry in pci_devices {
-            let path = entry?.path();
-            let vendor = fs::read_to_string(path.join("vendor"))?;
-            let device = fs::read_to_string(path.join("device"))?;
-            
-            if is_gpu_device(&vendor, &device) {
-                let iommu_group = get_iommu_group(&path)?;
-                devices.push(GPUDevice {
-                    id: format!("{}:{}", vendor.trim(), device.trim()),
-                    vendor_id: vendor.trim().to_string(),
-                    device_id: device.trim().to_string(),
-                    pci_address: path.file_name().unwrap().to_str().unwrap().to_string(),
-                    iommu_group,
-                    temperature: read_gpu_temperature(&path)?,
-                    utilization: read_gpu_utilization(&path)?,
+        // NVIDIA detection
+        if let Ok(nvml) = Nvml::init() {
+            for i in 0..nvml.device_count()? {
+                let device = nvml.device_by_index(i)?;
+                self.devices.push(GPUDevice {
+                    id: device.uuid()?,
+                    vendor: "NVIDIA".into(),
+                    model: device.name()?,
+                    vram_mb: device.memory_info()?.total / 1024 / 1024,
+                    driver_version: nvml.sys_driver_version()?,
+                    vulkan_support: Some(true),
+                    ..Default::default()
                 });
             }
         }
-        Ok(devices)
+        
+        // AMD detection (using amdgpu driver)
+        // ... AMD detection logic ...
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn detect_macos_gpus(&mut self) -> Result<()> {
+        use metal::Device;
+        
+        for device in Device::all() {
+            self.devices.push(GPUDevice {
+                id: device.registry_id().to_string(),
+                vendor: "Apple".into(),
+                model: device.name().to_string(),
+                vram_mb: device.recommended_max_vram() / 1024 / 1024,
+                metal_support: Some(true),
+                ..Default::default()
+            });
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn detect_windows_gpus(&mut self) -> Result<()> {
+        use dxgi::Factory;
+        
+        let factory = Factory::new()?;
+        for adapter in factory.adapters() {
+            let desc = adapter.get_desc()?;
+            self.devices.push(GPUDevice {
+                id: format!("PCI\\VEN_{:04X}&DEV_{:04X}", desc.vendor_id, desc.device_id),
+                vendor: match desc.vendor_id {
+                    0x10DE => "NVIDIA".into(),
+                    0x1002 => "AMD".into(),
+                    0x8086 => "Intel".into(),
+                    _ => "Unknown".into(),
+                },
+                model: desc.description.to_string(),
+                vram_mb: (desc.dedicated_video_memory / 1024 / 1024) as u64,
+                directx_version: Some(desc.revision as f32 / 10.0),
+                ..Default::default()
+            });
+        }
+        
+        Ok(())
     }
 
     // Assign those GPUs to their IOMMU groups - like assigning students to classrooms! 
@@ -82,7 +142,7 @@ impl GPUManager {
         // Match GPUs with their corresponding IOMMU groups
         for gpu in &mut self.devices {
             // Find IOMMU group from GPU's PCI address
-            let pci_path = Path::new("/sys/bus/pci/devices").join(&gpu.pci_address);
+            let pci_path = Path::new("/sys/bus/pci/devices").join(&gpu.id);
             if let Some(group) = get_iommu_group(&pci_path)? {
                 // Collect all devices in the group
                 let group_devices = iommu_groups.get(&group)
@@ -209,7 +269,7 @@ fn get_gpu_info() -> Result<Vec<GPUDevice>> {
     for display in CGDisplay::active_displays()? {
         gpus.push(GPUDevice {
             id: format!("display-{}", display),
-            vendor_id: "Apple".into(),
+            vendor: "Apple".into(),
             // MacOS specific GPU info
         });
     }
@@ -225,7 +285,7 @@ fn get_gpu_info() -> Result<Vec<GPUDevice>> {
     for adapter in factory.adapters() {
         gpus.push(GPUDevice {
             id: adapter.get_info().name,
-            vendor_id: "NVIDIA/AMD/Intel".into(),
+            vendor: "NVIDIA/AMD/Intel".into(),
             // Windows specific data
         });
     }
