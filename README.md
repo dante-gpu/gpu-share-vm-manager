@@ -2,8 +2,7 @@
 
 DanteGPU is a sophisticated virtual machine management system designed specifically for AI workload distribution and GPU resource sharing. Built with Rust, it provides a robust, high-performance solution for managing VMs with GPU passthrough capabilities.
 
-![E3F6FD7A-EC43-465B-9593-499372C5DD32_1_105_c](https://github.com/user-attachments/assets/ab27fb1f-cae3-4b8d-9c4a-68360a7e8b01)
-
+![flames](https://github.com/user-attachments/assets/dd5b5326-8a6a-4159-ade0-80141e8b28e6)
 
 
 ##  Overview
