@@ -24,6 +24,43 @@ fn test_vm_config() -> VMConfig {
         vcpus: 2,
         disk_path: PathBuf::from(format!("/var/lib/gpu-share/images/test-{}.qcow2", uuid)),
         disk_size_gb: 10,
+        gpu_passthrough: None,
+    }
+}
+
+// GPU test config
+async fn create_gpu_vm_config() -> VMConfig {
+    VMConfig {
+        name: "gpu-test-vm".into(),
+        memory_kb: 8 * 1024 * 1024,
+        vcpus: 4,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/gpu-test.qcow2"),
+        disk_size_gb: 40,
+        gpu_passthrough: Some("0000:01:00.0".into()),
+    }
+}
+
+// Big Scale VM Test
+fn create_large_vm_config() -> VMConfig {
+    VMConfig {
+        name: "large-test-vm".into(),
+        memory_kb: 16 * 1024 * 1024,
+        vcpus: 8,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/large-test.qcow2"),
+        disk_size_gb: 100,
+        gpu_passthrough: None,
+    }
+}
+
+// Minimum Resources Test
+fn create_minimal_vm_config() -> VMConfig {
+    VMConfig {
+        name: "minimal-test-vm".into(),
+        memory_kb: 512 * 1024,
+        vcpus: 1,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/minimal-test.qcow2"),
+        disk_size_gb: 10,
+        gpu_passthrough: None,
     }
 }
 
@@ -74,6 +111,7 @@ async fn test_concurrent_vm_creation() -> Result<()> {
             vcpus: 1,
             disk_path: PathBuf::from(format!("/var/lib/gpu-share/images/stress-{}.qcow2", i)),
             disk_size_gb: 5,
+            gpu_passthrough: None,
         };
         
         handles.push(tokio::spawn(async move {
@@ -104,6 +142,7 @@ async fn test_invalid_vm_configurations() -> Result<()> {
         vcpus: 2,
         disk_path: PathBuf::from("/invalid/path.qcow2"),
         disk_size_gb: 10,
+        gpu_passthrough: None,
     };
     
     let result = libvirt.0.create_vm(&config).await;
@@ -116,6 +155,7 @@ async fn test_invalid_vm_configurations() -> Result<()> {
         vcpus: 2,
         disk_path: PathBuf::from("/dev/null"), // Invalid disk image
         disk_size_gb: 10,
+        gpu_passthrough: None,
     };
     
     let result = libvirt.0.create_vm(&config).await;
