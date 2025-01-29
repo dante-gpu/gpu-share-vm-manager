@@ -79,7 +79,7 @@ use crate::core::vm::{VMStatus, VMConfig};
 use crate::gpu::device::{GPUManager, GPUDevice, GPUConfig};
 use crate::monitoring::metrics::{MetricsCollector, ResourceMetrics};
 use crate::api::middleware::rate_limit::{rate_limit_layer, GlobalRateLimit, RateLimitExceeded};
-use crate::utils::os::{current_platform};
+use crate::utils::os::current_platform;
 
 fn handle_error(err: impl std::fmt::Display) -> StatusCode {
     error!("Operation failed: {}", err);
@@ -102,6 +102,8 @@ pub struct CreateVMRequest {
     pub memory_mb: u64,
     pub gpu_required: bool,
     pub disk_size_gb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_passthrough: Option<String>,
     // pub username: String,
     // pub password: String,
 }
@@ -199,6 +201,7 @@ async fn create_vm(
         vcpus: params.cpu_cores,
         disk_path: PathBuf::from(format!("/var/lib/gpu-share/images/{}.qcow2", params.name)),
         disk_size_gb: params.disk_size_gb.unwrap_or(20),
+        gpu_passthrough: params.gpu_passthrough.clone(),
     };
     
     #[cfg(target_os = "linux")]
