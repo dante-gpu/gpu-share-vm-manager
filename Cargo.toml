@@ -28,12 +28,12 @@ governor = { version = "0.8.0", features = ["std", "nohashmap"] }
 # Platform-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
 libvirt = "0.1.0"
-nvml-wrapper = "0.12.0"
+nvml-wrapper = "0.10.0"
 glob = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24.0"
-metal = { version = "0.24", features = ["private"] }
+core-graphics = "0.23.2"
+metal = { version = "0.26.0", features = ["private"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["dxgi", "d3dcommon"] }
@@ -46,3 +46,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "gpu-share-vm-manager"
 path = "src/main.rs"
+
+[features]
+metal = ["dep:metal", "dep:core-graphics"]
+windows = ["dep:dxgi", "dep:winapi"]
+linux = ["dep:nvml-wrapper", "dep:libvirt"]
