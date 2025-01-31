@@ -1,18 +1,18 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
 use std::{
-    fs, path::{Path, PathBuf},
+    fs, path::Path,
     process::Command
 };
 use std::collections::HashMap;
-use utils::os::Platform;
+// use thiserror::Error;
+// use crate::utils::Platform;
 
 // GPU Configuration - Because every GPU needs its marching orders! 🎮
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUConfig {
     pub gpu_id: String,         // The unique identifier of our pixel-pushing warrior
-    pub iommu_group: String,    // IOMMU group - keeping our GPU in its own VIP section
+    pub iommu_group: u64,    // IOMMU group - keeping our GPU in its own VIP section
 }
 
 /// GPU Device Configuration
@@ -31,14 +31,14 @@ pub struct GPUDevice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directx_version: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub iommu_group: Option<u32>,
+    pub iommu_group: Option<u64>,
 }
 
 /// GPU Management Core
 /// Handles detection, monitoring and allocation of GPU resources
 pub struct GPUManager {
     devices: Vec<GPUDevice>,
-    iommu_groups: HashMap<u32, Vec<String>>,
+    iommu_groups: HashMap<u64, Vec<String>>,
 }
 
 impl GPUManager {
@@ -57,14 +57,13 @@ impl GPUManager {
 
     /// Main GPU detection entry point
     pub fn detect_gpus(&mut self) -> Result<()> {
-        match Platform::current() {
-            Platform::Linux => self.detect_linux_gpus(),
-            Platform::MacOS => self.detect_macos_gpus(),
-            Platform::Windows => self.detect_windows_gpus(),
-            _ => Err(GpuError::UnsupportedPlatform(
-                "Unknown platform".to_string()
-            ).into()),
-        }
+        #[cfg(target_os = "linux")]
+        self.detect_linux_gpus()?;
+        #[cfg(target_os = "macos")]
+        self.detect_macos_gpus()?;
+        #[cfg(target_os = "windows")]
+        self.detect_windows_gpus()?;
+        Ok(())
     }
 
     /// Linux-specific GPU detection using NVML and sysfs
@@ -118,7 +117,7 @@ impl GPUManager {
                 id: device.registry_id().to_string(),
                 vendor: "Apple".into(),
                 model: device.name().to_string(),
-                vram_mb: device.recommended_max_vram() / 1024 / 1024,
+                vram_mb: device.recommended_max_working_set_size() / 1024 / 1024,
                 metal_support: Some(true),
                 ..Default::default()
             });
@@ -176,13 +175,12 @@ impl GPUManager {
     }
 
     /// Validate IOMMU group safety for passthrough
-    pub fn validate_iommu_group(&self, group_id: u32) -> Result<()> {
+    pub fn validate_iommu_group(&self, group_id: u64) -> Result<()> {
         let devices = self.iommu_groups.get(&group_id)
-            .ok_or(GpuError::IommuGroupNotFound(group_id))?;
+            .ok_or(GPUError::IommuGroupNotFound(group_id))?;
 
         if devices.len() > 1 {
-            return Err(GpuError::UnsafeIommuGroup(
-                group_id, 
+            return Err(GPUError::UnsafeIommuGroup(
                 devices.join(", ")
             ).into());
         }
@@ -227,20 +225,16 @@ impl GPUManager {
 
     /// Get IOMMU group for PCI device
     #[cfg(target_os = "linux")]
-    fn get_iommu_group(path: &Path) -> Result<Option<u32>> {
+    fn get_iommu_group(path: &Path) -> Result<Option<u64>> {
         let group_link = path.join("iommu_group");
         if !group_link.exists() {
             return Ok(None);
         }
 
         let group_path = fs::read_link(group_link)?;
-        let group_id = group_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .parse::<u32>()?;
+        let group_str = group_path.file_name().unwrap().to_string_lossy();
 
-        Ok(Some(group_id))
+        Ok(Some(group_str.parse::<u64>()?))
     }
 
     // Time to introduce our GPU to its new VM friend! 🤝
@@ -251,7 +245,7 @@ impl GPUManager {
             .ok_or_else(|| anyhow::anyhow!("GPU not found"))?;
 
         // Check IOMMU group matches
-        if gpu.iommu_group.as_ref() != Some(&config.iommu_group) {
+        if gpu.iommu_group != Some(config.iommu_group) {
             return Err(anyhow::anyhow!("IOMMU group mismatch"));
         }
 
@@ -260,12 +254,12 @@ impl GPUManager {
         Ok("GPU attached successfully!".to_string())
     }
 
-    pub fn get_iommu_group(&self, gpu_id: &str) -> Result<Option<String>, anyhow::Error> {
+    pub fn get_iommu_group(&self, gpu_id: &str) -> Result<Option<u64>, anyhow::Error> {
         let gpu = self.devices.iter()
             .find(|gpu| gpu.id == gpu_id)
             .ok_or_else(|| anyhow::anyhow!("GPU not found: {}", gpu_id))?;
         
-        Ok(gpu.iommu_group.clone())
+        Ok(gpu.iommu_group)
     }
 }
 
@@ -353,7 +347,7 @@ fn is_gpu_device(vendor: &str, _device: &str) -> bool {
     vendor == "10de" || vendor == "1002" || vendor == "8086"
 }
 
-fn get_iommu_group(path: &Path) -> Result<Option<String>> {
+fn get_iommu_group(path: &Path) -> Result<Option<u64>> {
     let iommu_link = match fs::read_link(path.join("iommu_group")) {
         Ok(link) => link,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -362,15 +356,9 @@ fn get_iommu_group(path: &Path) -> Result<Option<String>> {
         Err(e) => return Err(e.into()),
     };
 
-    Ok(Some(
-        iommu_link
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid IOMMU group path"))?
-            .split('/')
-            .last()
-            .unwrap()
-            .to_string(),
-    ))
+    let group_str = iommu_link.to_str().ok_or_else(|| anyhow::anyhow!("Invalid IOMMU group path"))?;
+
+    Ok(Some(group_str.parse::<u64>()?))
 }
 
 fn read_gpu_temperature(path: &Path) -> Result<f64> {
@@ -393,7 +381,7 @@ fn get_gpu_info() -> Result<Vec<GPUDevice>> {
 fn get_gpu_info() -> Result<Vec<GPUDevice>> {
     use core_graphics::display::CGDisplay;
     let mut gpus = Vec::new();
-    for display in CGDisplay::active_displays()? {
+    for display in CGDisplay::active_displays().map_err(|e| anyhow::anyhow!("CGDisplay error: {}", e))? {
         gpus.push(GPUDevice {
             id: format!("display-{}", display),
             vendor: "Apple".into(),
@@ -424,4 +412,18 @@ fn get_gpu_info() -> Result<Vec<GPUDevice>> {
         });
     }
     Ok(gpus)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GPUError {
+    #[error("GPU not found")]
+    NotFound,
+    #[error("GPU already attached")]
+    AlreadyAttached,
+    #[error("Unsupported platform: {0}")]
+    UnsupportedPlatform(String),
+    #[error("IOMMU group {0} not found")]
+    IommuGroupNotFound(u64),
+    #[error("Unsafe IOMMU group configuration: {0}")]
+    UnsafeIommuGroup(String),
 }

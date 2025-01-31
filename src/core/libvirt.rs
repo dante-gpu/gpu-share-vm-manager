@@ -15,17 +15,7 @@ pub struct LibvirtManager {
 impl LibvirtManager {
     // hehe connect me senpai! ^_^
     pub fn new() -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        let uri = "qemu:///system";
-        
-        #[cfg(target_os = "macos")]
-        let uri = "qemu:///session";
-        
-        #[cfg(target_os = "windows")]
-        let uri = "qemu:///system";
-
-        info!("Initializing libvirt connection - let the show begin!");
-        let conn = Connect::open(Some(uri))?;
+        let conn = Connect::open(Some("qemu:///system"))?;
         Ok(Self { conn })
     }
 

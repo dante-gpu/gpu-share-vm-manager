@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use anyhow::{Result, Context};
 use virt::domain::Domain;
-use crate::utils::os::Platform;
+use crate::utils::Platform;
 
 /// Virtual Machine Configuration
 /// Platform-agnostic configuration with platform-specific optimizations
@@ -24,8 +24,9 @@ pub struct VirtualMachine {
     pub name: String,
     pub status: VMStatus,
     pub resources: VMResources,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub host_platform: Option<Platform>,
+    pub host_platform: Platform,
+    pub vcpus: u32,
+    pub memory_kb: u64,
 }
 
 /// Virtual Machine Status
@@ -203,7 +204,9 @@ impl VirtualMachine {
             name: domain.get_name().context("Failed to get name")?,
             status: VMStatus::from(info.state),
             resources: VMResources::default(),
-            host_platform: Some(Platform::current()),
+            host_platform: Platform::current(),
+            vcpus: 0, // Placeholder, actual implementation needed
+            memory_kb: 0, // Placeholder, actual implementation needed
         })
     }
 

@@ -4,7 +4,10 @@ Provides platform detection and feature flagging
 across Linux, macOS, and Windows
 */
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use std::env::consts;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Platform {
     Linux,
     MacOS,
@@ -15,21 +18,12 @@ pub enum Platform {
 impl Platform {
     /// Get current platform as enum variant
     pub fn current() -> Self {
-        #[cfg(target_os = "linux")]
-        return Platform::Linux;
-        
-        #[cfg(target_os = "macos")]
-        return Platform::MacOS;
-        
-        #[cfg(target_os = "windows")]
-        return Platform::Windows;
-        
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows"
-        )))]
-        Platform::Unknown
+        match consts::OS {
+            "linux" => Platform::Linux,
+            "macos" => Platform::MacOS,
+            "windows" => Platform::Windows,
+            _ => Platform::Unknown,
+        }
     }
 
     /// Check if current platform supports hardware virtualization
@@ -72,4 +66,9 @@ fn windows_has_hyperv() -> bool {
         .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization");
     
     key.is_ok()
+}
+
+pub fn current_platform() -> Platform {
+    // --Platform detection logic--
+    Platform::current()
 } 

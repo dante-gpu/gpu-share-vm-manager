@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
-virt = { version = "0.4.1", features = ["snapshot"] }
+virt = "0.4.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
@@ -13,41 +13,31 @@ tracing-subscriber = "0.3"
 anyhow = "1.0"  
 async-trait = "0.1"
 config = "0.15.6"
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8.0", features = ["macros"] }
 hyper = { version = "1.0", features = ["full"] }
 tower = { version = "0.5.2", features = ["limit", "util"] }
-tower-http = { version = "0.6.2", features = ["trace", "limit"] }
+tower-http = { version = "0.6.2", features = ["trace", "limit", "add-extension"] }
 clap = { version = "4.4", features = ["derive"] }
 colored = "3.0"
 thiserror = "2.0.11"
 chrono = "0.4"
 uuid = { version = "1.8.0", features = ["v4"] }
-libvirt = "0.1.0"
-governor = { version = "0.8.0", features = ["std", "nohashmap"] }
+governor = { version = "0.8", features = ["dashmap"] }
+jsonwebtoken = "8.3.0"
 
-# Platform-specific dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
-libvirt = "0.1.0"
-nvml-wrapper = "0.10.0"
-glob = "0.3"
+nvml-wrapper = { version = "0.10.0", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.23.2"
-metal = { version = "0.26.0", features = ["private"] }
+core-graphics = { version = "0.24.0", optional = true }
+metal = { version = "0.27.0", features = ["private"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["dxgi", "d3dcommon"] }
-dxgi = "0.4"
-
-[lib]
-name = "gpu_share_vm_manager"
-path = "src/lib.rs"
-
-[[bin]]
-name = "gpu-share-vm-manager"
-path = "src/main.rs"
+dxgi = { version = "0.3.0-alpha4", optional = true }
+winapi = { version = "0.3", features = ["dxgi", "d3dcommon"], optional = true }
+windows = { version = "0.48", features = ["Win32_Graphics_Dxgi"] }
 
 [features]
-metal = ["dep:metal", "dep:core-graphics"]
-windows = ["dep:dxgi", "dep:winapi"]
-linux = ["dep:nvml-wrapper", "dep:libvirt"]
+default = ["metal"]
+metal = ["dep:core-graphics", "dep:metal"]
+windows = ["dep:dxgi", "winapi"]
