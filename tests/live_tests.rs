@@ -36,6 +36,7 @@ async fn test_real_vm_creation() -> anyhow::Result<()> {
         vcpus: 2,                   // Dual-core power! ⚡
         disk_path: PathBuf::from("/var/lib/gpu-share/images/test-vm-1.qcow2"),
         disk_size_gb: 20,           // Room for activities! 
+        gpu_passthrough: None,
     };
 
     // Create and verify our new digital pet 🐕
@@ -78,6 +79,10 @@ async fn test_real_gpu_passthrough() -> anyhow::Result<()> {
         vcpus: 4,                   // Quad-core power for our GPU overlord! 
         disk_path: PathBuf::from("/var/lib/gpu-share/images/test-gpu-vm.qcow2"),
         disk_size_gb: 40,           // Extra space for those GPU drivers! 📦
+        gpu_passthrough: Some(GPUConfig {
+            gpu_id: test_gpu.id.clone(),
+            iommu_group: "0".to_string(), // Default group for testing
+        }),
     };
 
     let vm = libvirt.create_vm(&config).await?;
@@ -119,6 +124,7 @@ async fn test_real_metrics_collection() -> anyhow::Result<()> {
         vcpus: 2,
         disk_path: PathBuf::from("/var/lib/gpu-share/images/test-metrics.qcow2"),
         disk_size_gb: 20,
+        gpu_passthrough: None,
     };
 
     let vm = libvirt.create_vm(&config).await?;
@@ -255,6 +261,7 @@ async fn test_cross_platform_vm_operations() -> anyhow::Result<()> {
         vcpus: 2,
         disk_path: PathBuf::from("/var/lib/gpu-share/images/cross-platform-test.qcow2"),
         disk_size_gb: 20,
+        gpu_passthrough: None,
     };
 
     // Basic VM operations
@@ -276,4 +283,52 @@ async fn test_cross_platform_vm_operations() -> anyhow::Result<()> {
     vm.destroy()?;
     vm.undefine()?;
     Ok(())
+}
+
+// Test 1: Basic VM Creation
+async fn create_basic_vm() -> VMConfig {
+    VMConfig {
+        name: "test-vm-basic".into(),
+        memory_kb: 2048 * 1024,
+        vcpus: 2,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/test-vm-basic.qcow2"),
+        disk_size_gb: 20,
+        gpu_passthrough: None,
+    }
+}
+
+// Test 2: GPU Passthrough Test
+async fn create_gpu_vm() -> VMConfig {
+    VMConfig {
+        name: "test-vm-gpu".into(),
+        memory_kb: 4096 * 1024,
+        vcpus: 4,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/test-vm-gpu.qcow2"),
+        disk_size_gb: 40,
+        gpu_passthrough: Some("0000:01:00.0".into()),
+    }
+}
+
+// Test 3: Big Scale VM
+async fn create_large_vm() -> VMConfig {
+    VMConfig {
+        name: "test-vm-large".into(),
+        memory_kb: 16384 * 1024,
+        vcpus: 8,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/test-vm-large.qcow2"),
+        disk_size_gb: 100,
+        gpu_passthrough: None,
+    }
+}
+
+// Test 4: Edge Case - Minimum Resources
+async fn create_minimal_vm() -> VMConfig {
+    VMConfig {
+        name: "test-vm-minimal".into(),
+        memory_kb: 512 * 1024,
+        vcpus: 1,
+        disk_path: PathBuf::from("/var/lib/libvirt/images/test-vm-minimal.qcow2"),
+        disk_size_gb: 10,
+        gpu_passthrough: None,
+    }
 }

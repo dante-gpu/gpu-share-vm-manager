@@ -9,7 +9,7 @@ impl ResourceManager {
         Self
     }
 
-    pub fn check_quota(&self, user: &str, config: &VMConfig) -> Result<(), GpuShareError> {
+    pub fn check_quota(&self, _user: &str, _config: &VMConfig) -> Result<(), GpuShareError> {
         // Implement actual quota checks here
         Ok(())
     }

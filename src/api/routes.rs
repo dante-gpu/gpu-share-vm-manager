@@ -58,32 +58,31 @@
 */
 
 use axum::{
+    error_handling::HandleErrorLayer,
     routing::{get, post, delete},
     Router,
     extract::{Path, State},
+    http::{Request, StatusCode},
+    response::{IntoResponse, Response},
     Json,
-    http::StatusCode,
-    response::IntoResponse,
-    response::{Json, Response},
-    http::Request,
-    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::error;
+use virt::error::Error as VirtError;
 use std::path::PathBuf;
+use tower::limit::RateLimitLayer;
+use std::time::Duration;
+use std::error::Error as StdError;
+use tower::ServiceBuilder;
+use tower_http::extension::AddExtensionLayer;
 
 use crate::core::libvirt::LibvirtManager;
 use crate::core::vm::{VMStatus, VMConfig};
-use crate::gpu::device::{GPUManager, GPUDevice, GPUConfig};
-use crate::monitoring::metrics::{MetricsCollector, ResourceMetrics};
-use crate::api::middleware::rate_limit::{rate_limit_layer, GlobalRateLimit, RateLimitExceeded};
-
-fn handle_error(err: impl std::fmt::Display) -> StatusCode {
-    error!("Operation failed: {}", err);
-    StatusCode::INTERNAL_SERVER_ERROR
-}
+use crate::gpu::device::{GPUManager, GPUConfig, GPUError};
+use crate::monitoring::metrics::MetricsCollector;
+use crate::api::middleware::rate_limit::{RateLimiter, GlobalRateLimit, RateLimitExceeded};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -101,8 +100,8 @@ pub struct CreateVMRequest {
     pub memory_mb: u64,
     pub gpu_required: bool,
     pub disk_size_gb: Option<u64>,
-    // pub username: String,
-    // pub password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_passthrough: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,20 +120,52 @@ pub struct AttachGPURequest {
     pub gpu_id: String,
 }
 
-pub fn create_router(state: Arc<AppState>) -> Router {
+#[derive(Serialize, Deserialize)]
+pub struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoginResponse {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub enum ErrorNumber {
+    NoDomain,
+    InvalidOperation,
+    // ... other variants ...
+}
+
+pub fn create_router(app_state: Arc<AppState>) -> Router<Arc<AppState>> {
     let rate_limits = GlobalRateLimit::default();
 
-    Router::new()
-        // Public endpoints with stricter limits
+    // All auth endpoints 
+    let auth_router = Router::new()
         .route("/api/v1/auth/login", post(login))
-        .layer(rate_limit_layer(rate_limits.auth.clone()))
-        
-        // GPU operations with specific limits
+        .layer(
+            ServiceBuilder::new()
+                .layer(RateLimitLayer::new(
+                    rate_limits.auth_quota(),
+                    Duration::from_secs(60),
+                ))
+                .layer(AddExtensionLayer::new(rate_limits.auth.clone()))
+        );
+
+    let gpu_router = Router::new()
         .route("/api/v1/gpus", get(list_gpus))
         .route("/api/v1/vms/:id/attach_gpu", post(attach_gpu))
-        .layer(rate_limit_layer(rate_limits.gpu_operations.clone()))
-        
-        // General API endpoints
+        .layer(
+            ServiceBuilder::new()
+                .layer(RateLimitLayer::new(
+                    rate_limits.gpu_quota(),
+                    Duration::from_secs(60),
+                ))
+                .layer(AddExtensionLayer::new(rate_limits.gpu_operations.clone()))
+        );
+
+    let main_router = Router::new()
         .route("/api/v1/vms", post(create_vm))
         .route("/api/v1/vms", get(list_vms))
         .route("/api/v1/vms/:id", get(get_vm))
@@ -142,42 +173,64 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/vms/:id/start", post(start_vm))
         .route("/api/v1/vms/:id/stop", post(stop_vm))
         .route("/api/v1/metrics/:id", get(get_metrics))
-        .layer(rate_limit_layer(rate_limits.api.clone()))
-        
-        // Shared state and fallback
-        .with_state(state)
+        .layer(
+            ServiceBuilder::new()
+                .layer(RateLimitLayer::new(
+                    rate_limits.api_quota(),
+                    Duration::from_secs(1),
+                ))
+                .layer(AddExtensionLayer::new(rate_limits.api.clone()))
+        );
+
+    // Main router
+    Router::new()
+        .merge(auth_router)
+        .merge(gpu_router)
+        .merge(main_router)
+        .with_state(app_state)
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|e: Box<dyn std::error::Error>| async move {
+                    // Global error handling
+                    error!("Global error handler: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Something went wrong".to_string(),
+                    )
+                }))
+        )
         .fallback(fallback_handler)
-        .layer(HandleErrorLayer::new(handle_error))
 }
 
-async fn handle_error(error: Box<dyn std::error::Error + Send + Sync>) -> impl IntoResponse {
+async fn handle_error(error: Box<dyn StdError + Send + Sync>) -> impl IntoResponse {
     if error.is::<RateLimitExceeded>() {
         return RateLimitExceeded.into_response();
     }
     
-    if let Some(libvirt_error) = error.downcast_ref::<libvirt::Error>() {
-        match libvirt_error.code() {
-            libvirt::ErrorNumber::NO_DOMAIN => {
+    if let Some(virt_error) = error.downcast_ref::<VirtError>() {
+        match virt_error.code() {
+            virt::error::ErrorNumber::NoSuchDomain => {
                 return (StatusCode::NOT_FOUND, "VM not found").into_response()
             }
-            libvirt::ErrorNumber::OPERATION_INVALID => {
+            virt::error::ErrorNumber::InvalidOperation => {
                 return (StatusCode::BAD_REQUEST, "Invalid operation").into_response()
             }
             _ => {}
         }
     }
 
-    if let Some(gpu_error) = error.downcast_ref::<gpu::GPUError>() {
+    if let Some(gpu_error) = error.downcast_ref::<GPUError>() {
         match gpu_error {
-            gpu::GPUError::NotFound => {
+            GPUError::NotFound => {
                 return (StatusCode::NOT_FOUND, "GPU not found").into_response()
             }
-            gpu::GPUError::AlreadyAttached => {
+            GPUError::AlreadyAttached => {
                 return (StatusCode::CONFLICT, "GPU already attached").into_response()
             }
             _ => {}
         }
     }
+    
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("Internal server error: {}", error),
@@ -198,8 +251,29 @@ async fn create_vm(
         vcpus: params.cpu_cores,
         disk_path: PathBuf::from(format!("/var/lib/gpu-share/images/{}.qcow2", params.name)),
         disk_size_gb: params.disk_size_gb.unwrap_or(20),
+        gpu_passthrough: params.gpu_passthrough.clone(),
     };
     
+    #[cfg(target_os = "linux")]
+    {
+        // Linux-specific VM creation
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        // MacOS hypervisor framework usage
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        // Hyper-V integration
+    }
+    
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        return Err(Error::UnsupportedPlatform(current_platform().to_string()));
+    }
+
     let vm = libvirt.create_vm(&config).await
         .map_err(handle_error)?;
 
@@ -294,24 +368,12 @@ async fn start_vm(
 }
 
 #[axum::debug_handler]
-async fn start_vm(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>
-) -> Result<impl IntoResponse, StatusCode> {
-    let libvirt = state.libvirt.lock().await;
-    libvirt.start_vm(&id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(StatusCode::OK)
-}
-
-#[axum::debug_handler]
 async fn stop_vm(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>
 ) -> Result<impl IntoResponse, StatusCode> {
     let libvirt = state.libvirt.lock().await;
-    libvirt.stop_vm(&id)
+    libvirt.stop_domain(&id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
@@ -322,25 +384,26 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(credentials): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
-    let mut libvirt = state.libvirt.lock().await;
-
-    let domain = libvirt.lookup_domain(&credentials.username)
-        .map_err(handle_error)?;
-
-    let info = domain.get_info()
-        .map_err(handle_error)?;
+    if credentials.username.is_empty() || credentials.password.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    
+    Ok(Json(LoginResponse {
+        token: format!("jwt-token-{}", uuid::Uuid::new_v4())
+    }))
 }
 
-// async fn login(
-// #[axum::debug_handler]
-// async fn list_gpus(
-//     State(state): State<Arc<AppState>>
-// ) -> Result<impl IntoResponse, StatusCode> {
-//     let gpu_manager = state.gpu_manager.lock().await;
-//     let gpus = gpu_manager.list_gpus()
-//         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-//     Ok(Json(gpus))
-// }
+#[axum::debug_handler]
+async fn list_gpus(
+    State(state): State<Arc<AppState>>
+) -> Result<impl IntoResponse, StatusCode> {
+    let gpu_manager = state.gpu_manager.lock().await;
+    let gpus = gpu_manager.list_available_devices()
+        .map_err(|e| {
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
+    Ok(Json(gpus))
+}
 
 #[axum::debug_handler]
 async fn attach_gpu(
@@ -349,23 +412,27 @@ async fn attach_gpu(
     Json(request): Json<GPUConfig>
 ) -> Result<impl IntoResponse, StatusCode> {
     let mut gpu_manager = state.gpu_manager.lock().await;
-
-    let gpu_id = request.gpu_id.clone();
-    let gpu_manager = state.gpu_manager.lock().await;
     
-    let domain = libvirt.lookup_domain(&id)
-        .map_err(handle_error)?;
-
     let gpu_id = request.gpu_id.clone();
     let gpu_config = GPUConfig {
         gpu_id: request.gpu_id,
         iommu_group: gpu_manager.get_iommu_group(&gpu_id)
-            .map_err(handle_error)?
+            .map_err(|e| {
+                ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+            })?
             .ok_or(StatusCode::BAD_REQUEST)?,
     };
 
+    let libvirt = state.libvirt.lock().await;
+    let domain = libvirt.lookup_domain(&id)
+        .map_err(|e| {
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
+
     gpu_manager.attach_gpu_to_vm(&domain, &gpu_config).await
-        .map_err(handle_error)?;
+        .map_err(|e| {
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
 
     Ok(StatusCode::OK)
 }
@@ -373,7 +440,7 @@ async fn attach_gpu(
 #[axum::debug_handler]
 async fn fallback_handler(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    req: Request<axum::body::Body>,
 ) -> Result<Response, StatusCode> {
     error!("Fallback handler called for request: {:?}", req);
     Err(StatusCode::NOT_FOUND)
@@ -386,6 +453,39 @@ async fn get_metrics(
 ) -> Result<impl IntoResponse, StatusCode> {
     let metrics = state.metrics.lock().await;
     let vm_metrics = metrics.get_vm_metrics(&id)
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+        .map_err(|e| {
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
     Ok(Json(vm_metrics))
+}
+
+async fn delete_vm(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>
+) -> Result<impl IntoResponse, StatusCode> {
+    let mut libvirt = state.libvirt.lock().await;
+    libvirt.delete_domain(&id)
+        .await
+        .map_err(|e| {
+            error!("VM deletion error: {}", e);
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
+        
+    let mut metrics = state.metrics.lock().await;
+    metrics.stop()
+        .map_err(|e| {
+            error!("Metrics cleanup error: {}", e);
+            ErrorResponse::new(ErrorNumber::InternalError, e.to_string())
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stop_metrics_collection(
+    State(state): State<Arc<AppState>>
+) -> Result<Json<()>, ErrorResponse> {
+    let mut metrics = state.metrics.lock().await;
+    metrics.stop()
+        .map_err(|e| ErrorResponse::new(ErrorNumber::InternalError, e.to_string()))?;
+    Ok(Json(()))
 }

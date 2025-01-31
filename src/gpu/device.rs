@@ -1,120 +1,240 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
-use std::fs::{self};
-use std::path::Path;
-use std::process::Command;
+use std::{
+    fs, path::Path,
+    process::Command
+};
 use std::collections::HashMap;
+// use thiserror::Error;
+// use crate::utils::Platform;
 
 // GPU Configuration - Because every GPU needs its marching orders! 🎮
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUConfig {
     pub gpu_id: String,         // The unique identifier of our pixel-pushing warrior
-    pub iommu_group: String,    // IOMMU group - keeping our GPU in its own VIP section
+    pub iommu_group: u64,    // IOMMU group - keeping our GPU in its own VIP section
 }
 
-// Our GPU Device - The silicon celebrity of our virtual world! 
+/// GPU Device Configuration
+/// Contains platform-agnostic and platform-specific GPU properties
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GPUDevice {
-    pub id: String,             // Every star needs a unique name
-    pub vendor_id: String,      // Who's your manufacturer? 🏭
-    pub device_id: String,      // Model number - because we're all unique!
-    pub pci_address: String,    // Where to find this beauty on the PCI runway
-    pub iommu_group: Option<String>, // The VIP lounge number (if we're fancy enough)
-    pub temperature: f64,        // Temperature of the GPU
-    pub utilization: f64,         // Utilization of the GPU
+    pub id: String,
+    pub vendor: String,
+    pub model: String,
+    pub vram_mb: u64,
+    pub driver_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metal_support: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vulkan_support: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directx_version: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iommu_group: Option<u64>,
 }
 
-// The mastermind behind our GPU operations! 🧙‍♂️
+/// GPU Management Core
+/// Handles detection, monitoring and allocation of GPU resources
 pub struct GPUManager {
-    devices: Vec<GPUDevice>,    // Our collection of pixel-pushing powerhouses
+    devices: Vec<GPUDevice>,
+    iommu_groups: HashMap<u64, Vec<String>>,
 }
 
 impl GPUManager {
-    // Time to wake up our GPU manager! Rise and shine! 🌅
+    /// Initialize GPU Manager with platform-specific detection
     pub fn new() -> Result<Self> {
-        Ok(Self {
+        let mut manager = Self {
             devices: Vec::new(),
-        })
+            iommu_groups: HashMap::new(),
+        };
+
+        manager.detect_gpus()?;
+        manager.build_iommu_groups()?;
+
+        Ok(manager)
     }
 
-    // Let's discover what GPUs are hiding in this machine! 🔍
-    pub fn discover_gpus(&mut self) -> Result<Vec<GPUDevice>> {
-        let mut devices = Vec::new();
-        let pci_devices = fs::read_dir("/sys/bus/pci/devices")?;
+    /// Main GPU detection entry point
+    pub fn detect_gpus(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.detect_linux_gpus()?;
+        #[cfg(target_os = "macos")]
+        self.detect_macos_gpus()?;
+        #[cfg(target_os = "windows")]
+        self.detect_windows_gpus()?;
+        Ok(())
+    }
+
+    /// Linux-specific GPU detection using NVML and sysfs
+    #[cfg(target_os = "linux")]
+    fn detect_linux_gpus(&mut self) -> Result<()> {
+        use nvml_wrapper::Nvml;
         
-        for entry in pci_devices {
-            let path = entry?.path();
-            let vendor = fs::read_to_string(path.join("vendor"))?;
-            let device = fs::read_to_string(path.join("device"))?;
-            
-            if is_gpu_device(&vendor, &device) {
-                let iommu_group = get_iommu_group(&path)?;
-                devices.push(GPUDevice {
-                    id: format!("{}:{}", vendor.trim(), device.trim()),
-                    vendor_id: vendor.trim().to_string(),
-                    device_id: device.trim().to_string(),
-                    pci_address: path.file_name().unwrap().to_str().unwrap().to_string(),
-                    iommu_group,
-                    temperature: read_gpu_temperature(&path)?,
-                    utilization: read_gpu_utilization(&path)?,
+        // NVIDIA detection
+        if let Ok(nvml) = Nvml::init() {
+            for i in 0..nvml.device_count()? {
+                let device = nvml.device_by_index(i)?;
+                self.devices.push(GPUDevice {
+                    id: device.uuid()?,
+                    vendor: "NVIDIA".into(),
+                    model: device.name()?,
+                    vram_mb: device.memory_info()?.total / 1024 / 1024,
+                    driver_version: nvml.sys_driver_version()?,
+                    vulkan_support: Some(true),
+                    ..Default::default()
                 });
             }
         }
-        Ok(devices)
-    }
 
-    // Assign those GPUs to their IOMMU groups - like assigning students to classrooms! 
-    #[allow(dead_code)]
-    pub fn assign_iommu_groups(&mut self) -> Result<()> {
-        // Scan all PCI devices to create IOMMU groups
-        let mut iommu_groups = HashMap::new();
-        let pci_devices = fs::read_dir("/sys/bus/pci/devices")?;
-
-        for entry in pci_devices {
-            let path = entry?.path();
-            if let Some(group) = get_iommu_group(&path)? {
-                let devices = iommu_groups.entry(group).or_insert(Vec::new());
-                devices.push(path);
-            }
-        }
-
-        // Match GPUs with their corresponding IOMMU groups
-        for gpu in &mut self.devices {
-            // Find IOMMU group from GPU's PCI address
-            let pci_path = Path::new("/sys/bus/pci/devices").join(&gpu.pci_address);
-            if let Some(group) = get_iommu_group(&pci_path)? {
-                // Collect all devices in the group
-                let group_devices = iommu_groups.get(&group)
-                    .ok_or_else(|| anyhow::anyhow!("IOMMU group not found"))?;
-
-                // Validate group safety
-                if !Self::is_safe_iommu_group(group_devices) {
-                    warn!("Unsafe IOMMU group {} for GPU {}", group, gpu.id);
-                    continue;
-                }
-
-                // Assign group info to GPU
-                gpu.iommu_group = Some(group.clone());
-                
-                // Log all devices in group (optional)
-                // debug!("GPU {} assigned to IOMMU group {} with devices: {:?}", 
-                //     gpu.id, group, group_devices);
+        // AMD detection via sysfs
+        let amd_path = Path::new("/sys/class/drm/card*/device");
+        for entry in glob::glob(amd_path.to_str().unwrap())? {
+            let path = entry?;
+            if let Some(uevent) = Self::read_uevent(&path)? {
+                self.devices.push(GPUDevice {
+                    id: uevent.device_id,
+                    vendor: "AMD".into(),
+                    model: uevent.model,
+                    vram_mb: Self::read_amd_vram(&path)?,
+                    driver_version: Self::read_driver_version(&path)?,
+                    vulkan_support: Some(true),
+                    ..Default::default()
+                });
             }
         }
 
         Ok(())
     }
 
-    // IOMMU grubunun güvenli olduğunu kontrol et
-    fn is_safe_iommu_group(devices: &[std::path::PathBuf]) -> bool {
-        // A group should only contain GPU and audio controller
-        devices.iter().all(|path| {
-            let class = fs::read_to_string(path.join("class"))
-                .unwrap_or_default();
-            class.starts_with("0x0300") || // GPU
-            class.starts_with("0x0403")    // Ses kontrolcüsü
-        })
+    /// macOS GPU detection using Metal API
+    #[cfg(target_os = "macos")]
+    fn detect_macos_gpus(&mut self) -> Result<()> {
+        use metal::Device;
+        
+        for device in Device::all() {
+            self.devices.push(GPUDevice {
+                id: device.registry_id().to_string(),
+                vendor: "Apple".into(),
+                model: device.name().to_string(),
+                vram_mb: device.recommended_max_working_set_size() / 1024 / 1024,
+                metal_support: Some(true),
+                ..Default::default()
+            });
+        }
+        
+        Ok(())
+    }
+
+    /// Windows GPU detection using DXGI
+    #[cfg(target_os = "windows")]
+    fn detect_windows_gpus(&mut self) -> Result<()> {
+        use dxgi::{Adapter, Factory};
+        
+        let factory = Factory::new()?;
+        for adapter in factory.adapters() {
+            let desc = adapter.get_desc()?;
+            self.devices.push(GPUDevice {
+                id: format!("PCI\\VEN_{:04X}&DEV_{:04X}", desc.vendor_id, desc.device_id),
+                vendor: match desc.vendor_id {
+                    0x10DE => "NVIDIA".into(),
+                    0x1002 => "AMD".into(),
+                    0x8086 => "Intel".into(),
+                    _ => "Unknown".into(),
+                },
+                model: desc.description.to_string(),
+                vram_mb: (desc.dedicated_video_memory / 1024 / 1024) as u64,
+                directx_version: Some(desc.revision as f32 / 10.0),
+                ..Default::default()
+            });
+        }
+        
+        Ok(())
+    }
+
+    /// Build IOMMU groups for PCI passthrough
+    pub fn build_iommu_groups(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let pci_devices = Path::new("/sys/bus/pci/devices");
+            for entry in fs::read_dir(pci_devices)? {
+                let path = entry?.path();
+                if let Some(group) = Self::get_iommu_group(&path)? {
+                    let devices = self.iommu_groups.entry(group).or_default();
+                    devices.push(
+                        path.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                    );
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Validate IOMMU group safety for passthrough
+    pub fn validate_iommu_group(&self, group_id: u64) -> Result<()> {
+        let devices = self.iommu_groups.get(&group_id)
+            .ok_or(GPUError::IommuGroupNotFound(group_id))?;
+
+        if devices.len() > 1 {
+            return Err(GPUError::UnsafeIommuGroup(
+                devices.join(", ")
+            ).into());
+        }
+
+        Ok(())
+    }
+
+    /// Read AMD GPU VRAM from sysfs
+    #[cfg(target_os = "linux")]
+    fn read_amd_vram(path: &Path) -> Result<u64> {
+        let vram_path = path.join("mem_info_vram_total");
+        Ok(fs::read_to_string(vram_path)?.trim().parse::<u64>()? / 1024)
+    }
+
+    /// Read driver version from sysfs
+    #[cfg(target_os = "linux")]
+    fn read_driver_version(path: &Path) -> Result<String> {
+        Ok(fs::read_to_string(path.join("version"))?.trim().into())
+    }
+
+    /// Read PCI device information from uevent
+    #[cfg(target_os = "linux")]
+    fn read_uevent(path: &Path) -> Result<Option<UeventInfo>> {
+        let uevent_path = path.join("uevent");
+        if !uevent_path.exists() {
+            return Ok(None);
+        }
+
+        let mut uevent = UeventInfo::default();
+        for line in fs::read_to_string(uevent_path)?.lines() {
+            let parts: Vec<&str> = line.split('=').collect();
+            match parts[0] {
+                "PCI_ID" => uevent.device_id = parts[1].into(),
+                "PCI_SUBSYS_ID" => uevent.subsystem_id = parts[1].into(),
+                "MODALIAS" => uevent.model = parts[1].split(':').nth(2).unwrap().into(),
+                _ => {}
+            }
+        }
+
+        Ok(Some(uevent))
+    }
+
+    /// Get IOMMU group for PCI device
+    #[cfg(target_os = "linux")]
+    fn get_iommu_group(path: &Path) -> Result<Option<u64>> {
+        let group_link = path.join("iommu_group");
+        if !group_link.exists() {
+            return Ok(None);
+        }
+
+        let group_path = fs::read_link(group_link)?;
+        let group_str = group_path.file_name().unwrap().to_string_lossy();
+
+        Ok(Some(group_str.parse::<u64>()?))
     }
 
     // Time to introduce our GPU to its new VM friend! 🤝
@@ -125,7 +245,7 @@ impl GPUManager {
             .ok_or_else(|| anyhow::anyhow!("GPU not found"))?;
 
         // Check IOMMU group matches
-        if gpu.iommu_group.as_ref() != Some(&config.iommu_group) {
+        if gpu.iommu_group != Some(config.iommu_group) {
             return Err(anyhow::anyhow!("IOMMU group mismatch"));
         }
 
@@ -134,12 +254,73 @@ impl GPUManager {
         Ok("GPU attached successfully!".to_string())
     }
 
-    pub fn get_iommu_group(&self, gpu_id: &str) -> Result<Option<String>, anyhow::Error> {
+    pub fn get_iommu_group(&self, gpu_id: &str) -> Result<Option<u64>, anyhow::Error> {
         let gpu = self.devices.iter()
             .find(|gpu| gpu.id == gpu_id)
             .ok_or_else(|| anyhow::anyhow!("GPU not found: {}", gpu_id))?;
         
-        Ok(gpu.iommu_group.clone())
+        Ok(gpu.iommu_group)
+    }
+}
+
+/// Helper struct for parsing uevent data
+#[derive(Default)]
+struct UeventInfo {
+    device_id: String,
+    subsystem_id: String,
+    model: String,
+}
+
+impl Default for GPUDevice {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            vendor: String::new(),
+            model: String::new(),
+            vram_mb: 0,
+            driver_version: String::new(),
+            metal_support: None,
+            vulkan_support: None,
+            directx_version: None,
+            iommu_group: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_linux_gpu_detection() {
+        let mut manager = GPUManager::new().unwrap();
+        manager.detect_gpus().unwrap();
+        assert!(!manager.devices.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_macos_gpu_detection() {
+        let mut manager = GPUManager::new().unwrap();
+        manager.detect_gpus().unwrap();
+        assert!(!manager.devices.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_windows_gpu_detection() {
+        let mut manager = GPUManager::new().unwrap();
+        manager.detect_gpus().unwrap();
+        assert!(!manager.devices.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_iommu_group_handling() {
+        let mut manager = GPUManager::new().unwrap();
+        manager.build_iommu_groups().unwrap();
+        assert!(!manager.iommu_groups.is_empty());
     }
 }
 
@@ -166,7 +347,7 @@ fn is_gpu_device(vendor: &str, _device: &str) -> bool {
     vendor == "10de" || vendor == "1002" || vendor == "8086"
 }
 
-fn get_iommu_group(path: &Path) -> Result<Option<String>> {
+fn get_iommu_group(path: &Path) -> Result<Option<u64>> {
     let iommu_link = match fs::read_link(path.join("iommu_group")) {
         Ok(link) => link,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -175,15 +356,9 @@ fn get_iommu_group(path: &Path) -> Result<Option<String>> {
         Err(e) => return Err(e.into()),
     };
 
-    Ok(Some(
-        iommu_link
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid IOMMU group path"))?
-            .split('/')
-            .last()
-            .unwrap()
-            .to_string(),
-    ))
+    let group_str = iommu_link.to_str().ok_or_else(|| anyhow::anyhow!("Invalid IOMMU group path"))?;
+
+    Ok(Some(group_str.parse::<u64>()?))
 }
 
 fn read_gpu_temperature(path: &Path) -> Result<f64> {
@@ -194,4 +369,61 @@ fn read_gpu_temperature(path: &Path) -> Result<f64> {
 fn read_gpu_utilization(path: &Path) -> Result<f64> {
     let util_str = fs::read_to_string(path.join("gpu_busy_percent"))?.trim().to_string();
     Ok(util_str.parse()?)
+}
+
+#[cfg(target_os = "linux")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    // Linux-specific implementation using sysfs
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "macos")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    use core_graphics::display::CGDisplay;
+    let mut gpus = Vec::new();
+    for display in CGDisplay::active_displays().map_err(|e| anyhow::anyhow!("CGDisplay error: {}", e))? {
+        gpus.push(GPUDevice {
+            id: format!("display-{}", display),
+            vendor: "Apple".into(),
+            model: "Apple GPU".into(),
+            vram_mb: 8192,
+            driver_version: "Metal 3".into(),
+            metal_support: Some(true),
+            vulkan_support: None,
+            directx_version: None,
+            iommu_group: None,
+            ..Default::default()
+        });
+    }
+    Ok(gpus)
+}
+
+#[cfg(target_os = "windows")]
+fn get_gpu_info() -> Result<Vec<GPUDevice>> {
+    // Windows implementation using DXGI
+    use dxgi::Factory;
+    let factory = Factory::new()?;
+    let mut gpus = Vec::new();
+    for adapter in factory.adapters() {
+        gpus.push(GPUDevice {
+            id: adapter.get_info().name,
+            vendor: "NVIDIA/AMD/Intel".into(),
+            // Windows specific data
+        });
+    }
+    Ok(gpus)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GPUError {
+    #[error("GPU not found")]
+    NotFound,
+    #[error("GPU already attached")]
+    AlreadyAttached,
+    #[error("Unsupported platform: {0}")]
+    UnsupportedPlatform(String),
+    #[error("IOMMU group {0} not found")]
+    IommuGroupNotFound(u64),
+    #[error("Unsafe IOMMU group configuration: {0}")]
+    UnsafeIommuGroup(String),
 }
