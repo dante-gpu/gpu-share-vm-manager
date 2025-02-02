@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use anyhow::{Result, Context};
-use virt::domain::Domain;
 use crate::utils::Platform;
+use crate::core::docker_manager::DockerManager;
 
 /// Virtual Machine Configuration
 /// Platform-agnostic configuration with platform-specific optimizations
@@ -14,7 +14,7 @@ pub struct VMConfig {
     pub disk_path: PathBuf,
     pub disk_size_gb: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu_passthrough: Option<String>,
+    pub gpu_passthrough: Option<crate::gpu::device::GPUConfig>,
 }
 
 /// Virtual Machine Runtime State
@@ -176,16 +176,22 @@ impl VMConfig {
         }
 
         // GPU passthrough
-        if let Some(gpu_id) = &self.gpu_passthrough {
+        if let Some(gpu) = &self.gpu_passthrough {
+            let pci_parts: Vec<&str> = gpu.gpu_id.split(':').collect();
+            if pci_parts.len() != 3 {
+                return Err(anyhow::anyhow!("Invalid PCI address format"));
+            }
             devices.push_str(&format!(
                 r#"
                 <hostdev mode='subsystem' type='pci' managed='yes'>
                     <source>
-                        <address domain='0x0000' bus='{}' slot='{}' function='0x0'/>
+                        <address domain='0x0000' bus='{}' slot='{}' function='{}'/>
                     </source>
                 </hostdev>
                 "#,
-                &gpu_id[0..2], &gpu_id[2..4]
+                pci_parts[0],
+                pci_parts[1],
+                pci_parts[2].trim_end_matches(".0")
             ));
         }
 
@@ -195,51 +201,11 @@ impl VMConfig {
 }
 
 impl VirtualMachine {
-    /// Create new VM instance from libvirt domain
-    pub fn from_domain(domain: &Domain) -> Result<Self> {
-        let info = domain.get_info().context("Failed to get domain info")?;
-        
-        Ok(Self {
-            id: domain.get_uuid_string().context("Failed to get UUID")?,
-            name: domain.get_name().context("Failed to get name")?,
-            status: VMStatus::from(info.state),
-            resources: VMResources::default(),
-            host_platform: Platform::current(),
-            vcpus: 0, // Placeholder, actual implementation needed
-            memory_kb: 0, // Placeholder, actual implementation needed
-        })
-    }
-
     /// Start VM
-    pub fn start(&self) -> Result<()> {
-        // Implementation varies by platform
-        #[cfg(target_os = "linux")]
-        self.start_linux()?;
-
-        #[cfg(target_os = "macos")]
-        self.start_macos()?;
-
-        #[cfg(target_os = "windows")]
-        self.start_windows()?;
-
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    fn start_linux(&self) -> Result<()> {
-        // Use virsh commands or libvirt API
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn start_macos(&self) -> Result<()> {
-        // Use hyperkit or native hypervisor framework
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn start_windows(&self) -> Result<()> {
-        // Use Hyper-V manager
+    pub async fn start(&self, docker: &DockerManager) -> Result<()> {
+        docker.start_container(&self.id)
+            .await
+            .context("Container başlatılamadı")?;
         Ok(())
     }
 

@@ -4,7 +4,7 @@
 * Welcome to our metrics collection wonderland - where we track resources like 
 * Elon's Neuralink tracks your thoughts (just kidding, we're more reliable!)
 *
-* This module is the heart of our VM resource monitoring system. Here's what's cooking:
+* This module is the heart of our Container resource monitoring system. Here's what's cooking:
 *
 * Key Components:
 * -------------
@@ -42,7 +42,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tokio::time;
-use tracing::{info, error, warn};
+use tracing::{info, error};
+use std::error::Error as StdError;
+use crate::core::docker_manager::DockerManager;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ResourceMetrics {
@@ -63,42 +66,46 @@ pub struct GPUMetrics {
 }
 
 pub struct MetricsCollector {
-    vm_metrics: HashMap<String, Vec<ResourceMetrics>>,
+    container_metrics: Arc<Mutex<HashMap<String, Vec<ResourceMetrics>>>>,
     collection_interval: Duration,
     history_retention_hours: u64,
 }
 
 impl MetricsCollector {
-    pub fn new(collection_interval_secs: u64, history_retention_hours: u64) -> Self {
-        info!("Initializing Metrics Collector with {}s interval", collection_interval_secs);
+    pub fn new(interval_secs: u64, retention_hours: u64) -> Self {
+        info!("Initializing Metrics Collector with {}s interval", interval_secs);
         Self {
-            vm_metrics: HashMap::new(),
-            collection_interval: Duration::from_secs(collection_interval_secs),
-            history_retention_hours,
+            container_metrics: Arc::new(Mutex::new(HashMap::new())),
+            collection_interval: Duration::from_secs(interval_secs),
+            history_retention_hours: retention_hours,
         }
     }
 
-    pub async fn start_collection(&mut self, vm_id: String, domain: virt::domain::Domain) -> Result<()> {
-        info!("Starting metrics collection for VM: {}", vm_id);
+    pub async fn start_collection(&self, docker: &DockerManager, container_id: &str) -> Result<()> {
+        info!("Starting metrics collection for container: {}", container_id);
         
         let interval = self.collection_interval;
         let retention_hours = self.history_retention_hours;
-        let mut metrics_store = self.vm_metrics.clone();
+        let metrics_store = self.container_metrics.clone();
+
+        let docker = docker.clone();
+        let container_id = container_id.to_string();
 
         tokio::spawn(async move {
             let mut interval_timer = time::interval(interval);
             loop {
                 interval_timer.tick().await;
                 
-                match Self::collect_vm_metrics(&domain).await {
+                match Self::collect_single_container_metrics(&docker, &container_id).await {
                     Ok(metrics) => {
-                        if let Some(metrics_vec) = metrics_store.get_mut(&vm_id) {
+                        let mut store = metrics_store.lock().unwrap();
+                        if let Some(metrics_vec) = store.get_mut(&container_id) {
                             metrics_vec.push(metrics);
                             Self::cleanup_old_metrics(metrics_vec, retention_hours);
                         }
                     }
                     Err(e) => {
-                        error!("Failed to collect metrics for VM {}: {}", vm_id, e);
+                        error!("Failed to collect metrics for container {}: {}", container_id, e);
                     }
                 }
             }
@@ -107,111 +114,28 @@ impl MetricsCollector {
         Ok(())
     }
 
-    async fn collect_vm_metrics(domain: &virt::domain::Domain) -> Result<ResourceMetrics> {
-        let info = domain.get_info()?;
-        let job_stats = domain.get_job_stats(0)?;
+    async fn collect_single_container_metrics(docker: &DockerManager, container_id: &str) -> Result<ResourceMetrics> {
+        let stats = docker.inspect_container(container_id).await?;
+        
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs();
 
-        // Memory bilgilerini info'dan al
-        let memory_used = info.memory / 1024;  // KiB to MiB
-        let memory_total = info.max_mem / 1024;
-
-        // Calculate CPU usage
-        let cpu_time = job_stats.time_elapsed.unwrap_or(0);
-        let cpu_usage = Self::calculate_cpu_usage(cpu_time);
-
-        // Collect GPU metrics if available
-        let gpu_metrics = Self::collect_gpu_metrics(domain).await?;
+        let gpu_metrics = Self::collect_gpu_metrics(container_id).await?;
 
         Ok(ResourceMetrics {
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs(),
-            cpu_usage_percent: cpu_usage,
-            memory_usage_mb: memory_used,
-            memory_total_mb: memory_total,
+            timestamp,
+            cpu_usage_percent: stats.cpu_usage,
+            memory_usage_mb: stats.memory_usage as u64,
+            memory_total_mb: 0,
             gpu_metrics,
         })
     }
 
-    async fn collect_gpu_metrics(domain: &virt::domain::Domain) -> Result<Option<GPUMetrics>> {
-        // Check if VM has GPU attached
-        let xml = domain.get_xml_desc(0)?;
-        if !xml.contains("<hostdev") {
-            return Ok(None);
-        }
-
-        // Try NVIDIA GPU metrics first
-        if let Ok(metrics) = Self::collect_nvidia_metrics().await {
-            return Ok(Some(metrics));
-        }
-
-        // Fallback to AMD GPU metrics
-        if let Ok(metrics) = Self::collect_amd_metrics().await {
-            return Ok(Some(metrics));
-        }
-
-        warn!("No GPU metrics available for domain {}", domain.get_name()?);
+    async fn collect_gpu_metrics(_container_id: &str) -> Result<Option<GPUMetrics>> {
+        // TODO: Implement GPU metrics collection for Docker containers
+        // This will depend on how GPUs are attached to containers (nvidia-docker, etc.)
         Ok(None)
-    }
-
-    async fn collect_nvidia_metrics() -> Result<GPUMetrics> {
-        let output = tokio::process::Command::new("nvidia-smi")
-            .args(&[
-                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
-                "--format=csv,noheader,nounits"
-            ])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("nvidia-smi command failed"));
-        }
-
-        let output_str = String::from_utf8(output.stdout)?;
-        let values: Vec<&str> = output_str.trim().split(',').collect();
-
-        if values.len() != 5 {
-            return Err(anyhow::anyhow!("Unexpected nvidia-smi output format"));
-        }
-
-        Ok(GPUMetrics {
-            utilization_percent: values[0].trim().parse()?,
-            memory_used_mb: values[1].trim().parse()?,
-            memory_total_mb: values[2].trim().parse()?,
-            temperature_celsius: values[3].trim().parse()?,
-            power_usage_watts: values[4].trim().parse()?,
-        })
-    }
-
-    async fn collect_amd_metrics() -> Result<GPUMetrics> {
-        // Read metrics from sysfs for AMD GPUs
-        let utilization = tokio::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
-            .await?
-            .trim()
-            .parse()?;
-
-        let memory_total = tokio::fs::read_to_string("/sys/class/drm/card0/device/mem_info_vram_total")
-            .await?
-            .trim()
-            .parse::<u64>()? / (1024 * 1024);
-
-        let memory_used = tokio::fs::read_to_string("/sys/class/drm/card0/device/mem_info_vram_used")
-            .await?
-            .trim()
-            .parse::<u64>()? / (1024 * 1024);
-
-        let temperature = tokio::fs::read_to_string("/sys/class/drm/card0/device/hwmon/hwmon0/temp1_input")
-            .await?
-            .trim()
-            .parse::<i32>()? / 1000;
-
-        Ok(GPUMetrics {
-            utilization_percent: utilization,
-            memory_used_mb: memory_used,
-            memory_total_mb: memory_total,
-            temperature_celsius: temperature,
-            power_usage_watts: 0.0, // AMD doesn't expose power usage in sysfs
-        })
     }
 
     fn calculate_cpu_usage(cpu_time: u64) -> f64 {
@@ -249,11 +173,50 @@ impl MetricsCollector {
         metrics.retain(|m| current_time - m.timestamp < retention_secs);
     }
 
-    pub fn get_vm_metrics(&self, vm_id: &str) -> Result<Vec<ResourceMetrics>, anyhow::Error> {
-        if let Some(metrics) = self.vm_metrics.get(vm_id) {
+    pub fn get_metrics(&self, container_id: &str) -> Result<Vec<ResourceMetrics>> {
+        let store = self.container_metrics.lock().unwrap();
+        if let Some(metrics) = store.get(container_id) {
             Ok(metrics.clone())
         } else {
-            Err(anyhow::anyhow!("No metrics found for VM {}", vm_id))
+            Err(anyhow::anyhow!("No metrics found for container {}", container_id))
         }
     }
+
+    pub fn stop(&mut self) -> Result<(), Box<dyn StdError>> {
+        // Gerçek implementasyon
+        Ok(())
+    }
+
+    pub async fn collect_container_metrics(&mut self, docker: &DockerManager) -> Result<()> {
+        let containers = docker.list_containers().await?;
+        
+        for container_id in containers {
+            let metrics = Self::collect_single_container_metrics(docker, &container_id).await?;
+            self.container_metrics.lock().unwrap().entry(container_id.clone())
+                .or_default()
+                .push(metrics);
+        }
+        Ok(())
+    }
+
+    pub async fn get_container_stats(&self, docker: &DockerManager, container_id: &str) -> Option<ContainerStats> {
+        docker.inspect_container(container_id).await.ok().map(|stats| {
+            ContainerStats {
+                cpu_usage: stats.cpu_usage,
+                memory_usage: stats.memory_usage,
+            }
+        })
+    }
+
+    pub async fn get_container_metrics(&self, container_id: &str) -> Result<Vec<ResourceMetrics>> {
+        self.container_metrics.lock().unwrap().get(container_id)
+            .map(|metrics| metrics.clone())
+            .ok_or_else(|| anyhow::anyhow!("No metrics found for container"))
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContainerStats {
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
 }
