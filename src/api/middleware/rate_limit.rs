@@ -112,7 +112,52 @@ impl fmt::Display for RateLimitExceeded {
         write!(f, "Rate limit exceeded")
     }
 }
+#[derive(Clone)]
+pub struct RateLimit<T> {
+    inner: T,
+}
 
+// wrapper for RateLimitLayer
+#[derive(Clone)]
+pub struct CustomRateLimitLayer {
+    rate: u64,
+    per: Duration,
+    inner: RateLimitLayer,
+}
+
+impl CustomRateLimitLayer {
+    pub fn new(rate: u64, per: Duration) -> Self {
+        Self {
+            rate,
+            per,
+            inner: RateLimitLayer::new(rate, per),
+        }
+    }
+
+    pub fn get_rate(&self) -> u64 {
+        self.rate
+    }
+
+    pub fn get_per(&self) -> Duration {
+        self.per
+    }
+
+    pub fn into_inner(self) -> RateLimitLayer {
+        self.inner
+    }
+}
+
+impl From<RateLimitLayer> for CustomRateLimitLayer {
+    fn from(_layer: RateLimitLayer) -> Self {
+        Self::new(100, Duration::from_secs(1))
+    }
+}
+
+impl From<CustomRateLimitLayer> for RateLimitLayer {
+    fn from(custom: CustomRateLimitLayer) -> Self {
+        custom.into_inner()
+    }
+}
 
 #[cfg(test)]
 mod tests {

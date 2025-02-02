@@ -15,7 +15,7 @@ pub struct LibvirtManager {
 impl LibvirtManager {
     // hehe connect me senpai! ^_^
     pub fn new() -> Result<Self> {
-        let conn = Connect::open(Some("qemu:///system"))?;
+        let conn = Connect::open(Some("qemu:///session"))?;
         Ok(Self { conn })
     }
 
