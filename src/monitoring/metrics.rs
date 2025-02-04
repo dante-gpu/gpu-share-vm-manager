@@ -138,7 +138,7 @@ impl MetricsCollector {
         Ok(None)
     }
 
-    fn calculate_cpu_usage(cpu_time: u64) -> f64 {
+    pub(crate) fn calculate_cpu_usage(cpu_time: u64) -> f64 {
         // CPU usage calculation based on CPU time delta
         static mut LAST_CPU_TIME: u64 = 0;
         static mut LAST_TIMESTAMP: u64 = 0;
@@ -183,7 +183,7 @@ impl MetricsCollector {
     }
 
     pub fn stop(&mut self) -> Result<(), Box<dyn StdError>> {
-        // Gerçek implementasyon
+
         Ok(())
     }
 
@@ -212,6 +212,34 @@ impl MetricsCollector {
         self.container_metrics.lock().unwrap().get(container_id)
             .map(|metrics| metrics.clone())
             .ok_or_else(|| anyhow::anyhow!("No metrics found for container"))
+    }
+
+    pub fn current_load(&self) -> f64 {
+        let metrics_store = self.container_metrics.lock().unwrap();
+        
+
+        let mut total_cpu = 0.0;
+        let mut total_memory = 0.0;
+        let mut count = 0;
+
+        for container_metrics in metrics_store.values() {
+            if let Some(latest) = container_metrics.last() {
+                total_cpu += latest.cpu_usage_percent;
+                total_memory += (latest.memory_usage_mb as f64 / latest.memory_total_mb as f64) * 100.0;
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return 0.0;
+        }
+
+
+        let avg_cpu = total_cpu / count as f64;
+        let avg_memory = total_memory / count as f64;
+        
+
+        (avg_cpu + avg_memory) / 2.0
     }
 }
 

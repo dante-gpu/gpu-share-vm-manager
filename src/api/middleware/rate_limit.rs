@@ -12,12 +12,13 @@ use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tower::limit::RateLimitLayer;
 use std::error::Error as StdError;
 use std::fmt;
+use crate::monitoring::MetricsCollector;
 
 /// Rate limiting configuration for API endpoints
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    pub requests: NonZeroU32,
-    pub per_seconds: u64,
+    pub requests: NonZeroU32,    
+    pub per_seconds: u64,       
 }
 
 impl RateLimitConfig {
@@ -114,7 +115,14 @@ impl fmt::Display for RateLimitExceeded {
 }
 #[derive(Clone)]
 pub struct RateLimit<T> {
-    inner: T,
+    pub inner: T,
+    pub limiter: Arc<RateLimiter<String, DashMapStore<String>, QuantaClock, NoOpMiddleware>>,
+}
+
+impl<T> RateLimit<T> {
+    pub fn new(inner: T, limiter: Arc<RateLimiter<String, DashMapStore<String>, QuantaClock, NoOpMiddleware>>) -> Self {
+        Self { inner, limiter }
+    }
 }
 
 // wrapper for RateLimitLayer
@@ -208,5 +216,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+}
+
+
+pub struct AdaptiveRateLimiter {
+    base_limits: RateLimitConfig,
+    metrics: Arc<MetricsCollector>,
+}
+
+impl AdaptiveRateLimiter {
+    pub fn adjust_limits_based_on_load(&mut self) {
+        let current_load = self.metrics.current_load();
+        if current_load > 80.0 {
+            self.base_limits.requests = NonZeroU32::new(
+                self.base_limits.requests.get() * 2
+            ).unwrap();
+        }
     }
 }

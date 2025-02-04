@@ -3,13 +3,16 @@ use headers::{Authorization, HeaderMapExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Claims {
+pub struct Claims {
     sub: String,
     role: String,
     exp: usize,
 }
 
-pub async fn auth_middleware<B>(mut req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
+pub async fn auth_middleware<B>(
+    mut req: Request<B>,
+    next: Next<B>,
+) -> Result<Response, StatusCode> {
     let token = req.headers()
         .typed_get::<Authorization<Bearer>>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
