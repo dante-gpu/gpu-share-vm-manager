@@ -6,18 +6,17 @@ use crossterm::event::{Event, KeyCode};
 use crossterm::{execute, terminal::*};
 use ratatui::{prelude::*, widgets::*};
 use std::sync::{Arc, Mutex};
+use gpu_share_vm_manager::dashboard;
+use tokio::runtime::Runtime;
+use tokio::sync::Mutex as TokioMutex;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let gpupool = Arc::new(Mutex::new(GPUPool::new()));
-    let user_manager = Arc::new(Mutex::new(UserManager::new()));
-    let billing_system = Arc::new(Mutex::new(BillingSystem::new()));
+fn main() -> anyhow::Result<()> {
+    let gpupool = Arc::new(TokioMutex::new(GPUPool::new()));
+    let users = Arc::new(TokioMutex::new(UserManager::new()));
+    let billing = Arc::new(TokioMutex::new(BillingSystem::new()));
     
-    start_dashboard(
-        gpupool,
-        user_manager,
-        billing_system
-    ).await
+    let rt = Runtime::new()?;
+    rt.block_on(dashboard::start_dashboard(gpupool, users, billing))
 }
 
 pub async fn start_dashboard(

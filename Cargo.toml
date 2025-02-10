@@ -48,6 +48,7 @@ windows = { version = "0.48", features = ["Win32_Graphics_Dxgi"] }
 default = ["metal"]
 metal = ["dep:core-graphics", "dep:metal"]
 windows = ["dep:dxgi", "winapi"]
+dashboard = []
 
 [[bin]]
 name = "gpu-share-vm-manager"
@@ -56,3 +57,8 @@ path = "src/main.rs"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 rand = "0.8"
+futures = "0.3"
+
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"

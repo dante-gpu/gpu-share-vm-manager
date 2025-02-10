@@ -289,6 +289,7 @@ struct UeventInfo {
     device_id: String,
     subsystem_id: String,
     model: String,
+    iommu_group: Option<u64>,
 }
 
 impl GPUInfo {
